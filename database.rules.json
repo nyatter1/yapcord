@@ -1,0 +1,37 @@
+{
+  "rules": {
+    ".read": true,
+    ".write": true,
+    "users": {
+      ".indexOn": ["username", "email", "lastSeen"]
+    },
+    "emails": {
+      ".read": true,
+      ".write": true
+    },
+    "channels": {
+      "$channelId": {
+        "messages": {
+          ".indexOn": ["createdAt"]
+        }
+      }
+    },
+    "self_notes": {
+      "$userId": {
+        ".indexOn": ["createdAt"]
+      }
+    },
+    "direct_messages": {
+      "$dmChatId": {
+        "messages": {
+          ".indexOn": ["createdAt"]
+        }
+      }
+    },
+    "friends": {
+      "$userId": {
+        ".indexOn": ["addedAt"]
+      }
+    }
+  }
+}

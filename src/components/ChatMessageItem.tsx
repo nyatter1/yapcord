@@ -11,6 +11,7 @@ interface ChatMessageItemProps {
   onDelete: (msg: ChatMessage) => void;
   onToggleReaction: (msg: ChatMessage, emoji: string) => void;
   onImageClick: (url: string) => void;
+  onAuthorClick?: (username: string) => void;
 }
 
 export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
@@ -19,7 +20,8 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
   onReply,
   onDelete,
   onToggleReaction,
-  onImageClick
+  onImageClick,
+  onAuthorClick
 }) => {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const pickerRef = useRef<HTMLDivElement>(null);
@@ -76,7 +78,10 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
       {/* Main message row */}
       <div className="flex gap-3.5 min-w-0">
         {/* Author Avatar */}
-        <div className="w-10 h-10 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white flex-shrink-0 mt-0.5 ring-2 ring-[#232428]">
+        <div
+          onClick={() => onAuthorClick?.(msg.authorUsername)}
+          className="w-10 h-10 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white flex-shrink-0 mt-0.5 ring-2 ring-[#232428] cursor-pointer hover:ring-[#ff6b00] transition-all"
+        >
           {msg.authorAvatar ? (
             <img src={msg.authorAvatar} alt="Avatar" className="w-full h-full object-cover" />
           ) : (
@@ -87,7 +92,10 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
         {/* Content column */}
         <div className="min-w-0 flex-1">
           <div className="flex items-baseline gap-2">
-            <span className="font-semibold text-white text-[15px] hover:underline cursor-pointer">
+            <span
+              onClick={() => onAuthorClick?.(msg.authorUsername)}
+              className="font-semibold text-white text-[15px] hover:underline cursor-pointer"
+            >
               {msg.authorDisplayName || msg.authorUsername || 'Member'}
             </span>
             <span className="text-[11px] text-[#949ba4]">

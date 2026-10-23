@@ -37,6 +37,7 @@ export interface UserProfile {
   newsletter?: boolean;
   pinnedDms?: Record<string, boolean>;
   clearedDms?: Record<string, number>;
+  closedDms?: Record<string, boolean>;
 }
 
 export interface MessageReplyInfo {
@@ -631,5 +632,23 @@ export async function clearUserDmChat(
   const dmKey = normalizeKey(targetDmKey);
   const clearRef = ref(rtdb, `users/${userKey}/clearedDms/${dmKey}`);
   await set(clearRef, Date.now());
+}
+
+/**
+ * Marks a DM conversation as closed/removed or open for a user in Realtime Database.
+ */
+export async function setClosedDm(
+  userId: string,
+  targetDmKey: string,
+  isClosed: boolean
+): Promise<void> {
+  const userKey = normalizeKey(userId);
+  const dmKey = normalizeKey(targetDmKey);
+  const closedRef = ref(rtdb, `users/${userKey}/closedDms/${dmKey}`);
+  if (isClosed) {
+    await set(closedRef, true);
+  } else {
+    await remove(closedRef);
+  }
 }
 

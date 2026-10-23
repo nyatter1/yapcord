@@ -33,7 +33,8 @@ import {
   UserPlus,
   UserCheck,
   Pin,
-  PinOff
+  PinOff,
+  MoreHorizontal
 } from 'lucide-react';
 import { uploadToCloudinary } from './lib/cloudinary';
 import {
@@ -63,7 +64,8 @@ import {
   declineFriendRequest,
   subscribeToFriends,
   togglePinDm,
-  clearUserDmChat
+  clearUserDmChat,
+  setClosedDm
 } from './lib/database';
 import { ChatMessageItem } from './components/ChatMessageItem';
 import { FriendsView } from './components/FriendsView';
@@ -475,11 +477,24 @@ export default function App() {
     targetAvatar: string | null;
   } | null>(null);
 
-  // Local state for pinned and cleared DMs
+  // Local state for pinned, cleared, and closed DMs
   const [localPinnedDms, setLocalPinnedDms] = useState<Record<string, boolean>>({});
   const [localClearedDms, setLocalClearedDms] = useState<Record<string, number>>({});
+  const [localClosedDms, setLocalClosedDms] = useState<Record<string, boolean>>(() => {
+    try {
+      const raw = localStorage.getItem(`yapzo_closed_dms_${currentUsername}`);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
 
-  // Sync user's pinned and cleared DMs from allUsers profile
+  // State for server member centered profile modal
+  const [selectedServerMember, setSelectedServerMember] = useState<UserProfile | null>(null);
+  const [showMemberMoreMenu, setShowMemberMoreMenu] = useState(false);
+  const [memberModalFeedback, setMemberModalFeedback] = useState<string | null>(null);
+
+  // Sync user's pinned, cleared, and closed DMs from allUsers profile
   const loggedInUserProfile = allUsers.find(
     (u) => u.username.toLowerCase() === currentUsername.toLowerCase()
   );
@@ -491,6 +506,9 @@ export default function App() {
       }
       if (loggedInUserProfile.clearedDms) {
         setLocalClearedDms(loggedInUserProfile.clearedDms);
+      }
+      if (loggedInUserProfile.closedDms) {
+        setLocalClosedDms((prev) => ({ ...loggedInUserProfile.closedDms, ...prev }));
       }
     }
   }, [loggedInUserProfile]);
@@ -532,6 +550,113 @@ export default function App() {
     setDmContextMenu(null);
   };
 
+  // Delete DM: wipes all messages for the current user and removes DM from list
+  const handleDeleteDm = async (targetDm: string) => {
+    const key = targetDm.toLowerCase();
+    const now = Date.now();
+
+    // 1. Wipe all messages for this user in this DM
+    setLocalClearedDms((prev) => ({
+      ...prev,
+      [key]: now
+    }));
+    try {
+      await clearUserDmChat(currentUsername, key);
+    } catch (err) {
+      console.error('Error clearing DM chat:', err);
+    }
+
+    // 2. Unpin DM if pinned
+    if (localPinnedDms[key]) {
+      setLocalPinnedDms((prev) => {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+      try {
+        await togglePinDm(currentUsername, key, false);
+      } catch (err) {
+        console.error('Error unpinning deleted DM:', err);
+      }
+    }
+
+    // 3. Mark DM as closed / removed from the DM list
+    setLocalClosedDms((prev) => {
+      const next = { ...prev, [key]: true };
+      try {
+        localStorage.setItem(`yapzo_closed_dms_${currentUsername}`, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    try {
+      await setClosedDm(currentUsername, key, true);
+    } catch (err) {
+      console.error('Error saving closed DM:', err);
+    }
+
+    // 4. If current active DM was deleted, switch to friends tab
+    if (selectedDm.toLowerCase() === key) {
+      setDmTab('friends');
+    }
+
+    setDmContextMenu(null);
+  };
+
+  // Open / Re-open a DM (from Friends tab, server member card, etc.)
+  const handleOpenUserDm = async (targetUsername: string) => {
+    const key = targetUsername.toLowerCase();
+
+    // Remove from closed DMs so it appears back in the Direct Messages list
+    setLocalClosedDms((prev) => {
+      const next = { ...prev };
+      delete next[key];
+      try {
+        localStorage.setItem(`yapzo_closed_dms_${currentUsername}`, JSON.stringify(next));
+      } catch {}
+      return next;
+    });
+    try {
+      await setClosedDm(currentUsername, key, false);
+    } catch (err) {
+      console.error('Error reopening DM:', err);
+    }
+
+    setIsHomeSelected(true);
+    setActiveServerId(null);
+    setDmTab('dms');
+    setSelectedDm(targetUsername);
+  };
+
+  // Add friend directly from server member profile modal
+  const handleAddFriendFromModal = async (member: UserProfile) => {
+    if (!member || member.username.toLowerCase() === currentUsername.toLowerCase()) return;
+    try {
+      const myProfile: UserProfile = {
+        id: currentUsername,
+        username: currentUsername,
+        email: regEmail || loginEmail || 'user@yapzo.gg',
+        displayName: currentDisplayName,
+        avatar: avatarPreview,
+        banner: bannerPreview,
+        pronouns,
+        aboutMe,
+        status: userStatus,
+        isMuted,
+        isDeafened,
+        createdAt: Date.now(),
+        lastSeen: Date.now()
+      };
+      const res = await addFriend(myProfile, member.username);
+      if (res.success) {
+        setMemberModalFeedback(`Friend request sent to @${member.username}!`);
+      } else {
+        setMemberModalFeedback(res.error || 'Failed to send request');
+      }
+    } catch (err) {
+      setMemberModalFeedback('Error sending friend request');
+    }
+  };
+
   // Filter messages based on localClearedDms
   const selfClearedAt = localClearedDms['self'] || 0;
   const displayedSelfMessages = selfMessages.filter((m) => m.createdAt > selfClearedAt);
@@ -539,32 +664,69 @@ export default function App() {
   const dmClearedAt = localClearedDms[selectedDm.toLowerCase()] || 0;
   const displayedDmMessages = dmChatMessages.filter((m) => m.createdAt > dmClearedAt);
 
-  // All DM items list (Self note + Friends) with pinned status
-  const allDmItems = [
-    {
-      key: 'self',
-      isSelf: true,
-      username: 'self',
-      displayName: currentDisplayName,
-      avatar: avatarPreview,
-      status: userStatus,
-      isPinned: !!localPinnedDms['self'],
-      subtitle:
-        displayedSelfMessages.length > 0
-          ? displayedSelfMessages[displayedSelfMessages.length - 1].text || '[Image]'
-          : 'Message yourself'
-    },
-    ...friends.map((friend) => ({
-      key: friend.username.toLowerCase(),
-      isSelf: false,
-      username: friend.username,
-      displayName: friend.displayName || friend.username,
-      avatar: friend.avatar,
-      status: friend.status || 'offline',
-      isPinned: !!localPinnedDms[friend.username.toLowerCase()],
-      subtitle: `@${friend.username}`
-    }))
-  ];
+  // All active DM items list (Self note + Friends + Active Open DMs) excluding closed/deleted DMs
+  const dmMap = new Map<string, {
+    key: string;
+    isSelf: boolean;
+    username: string;
+    displayName: string;
+    avatar: string | null;
+    status: UserStatus;
+    isPinned: boolean;
+    subtitle: string;
+  }>();
+
+  // Always include self note
+  dmMap.set('self', {
+    key: 'self',
+    isSelf: true,
+    username: 'self',
+    displayName: currentDisplayName,
+    avatar: avatarPreview,
+    status: userStatus,
+    isPinned: !!localPinnedDms['self'],
+    subtitle:
+      displayedSelfMessages.length > 0
+        ? displayedSelfMessages[displayedSelfMessages.length - 1].text || '[Image]'
+        : 'Message yourself'
+  });
+
+  // Include friends that have not been closed/deleted
+  friends.forEach((friend) => {
+    const k = friend.username.toLowerCase();
+    if (!localClosedDms[k]) {
+      dmMap.set(k, {
+        key: k,
+        isSelf: false,
+        username: friend.username,
+        displayName: friend.displayName || friend.username,
+        avatar: friend.avatar,
+        status: friend.status || 'offline',
+        isPinned: !!localPinnedDms[k],
+        subtitle: `@${friend.username}`
+      });
+    }
+  });
+
+  // If a specific DM is currently selected and not closed, make sure it appears in DM list
+  if (selectedDm && selectedDm !== 'self') {
+    const k = selectedDm.toLowerCase();
+    if (!localClosedDms[k] && !dmMap.has(k)) {
+      const uProfile = allUsers.find((u) => u.username.toLowerCase() === k);
+      dmMap.set(k, {
+        key: k,
+        isSelf: false,
+        username: uProfile?.username || selectedDm,
+        displayName: uProfile?.displayName || uProfile?.username || selectedDm,
+        avatar: uProfile?.avatar || null,
+        status: uProfile?.status || 'offline',
+        isPinned: !!localPinnedDms[k],
+        subtitle: `@${uProfile?.username || selectedDm}`
+      });
+    }
+  }
+
+  const allDmItems = Array.from(dmMap.values());
 
   // Pinned DMs sorted at top of sidebar DM list
   const sortedDmItems = [...allDmItems].sort((a, b) => {
@@ -574,7 +736,7 @@ export default function App() {
   });
 
   // Pinned DM shortcuts for top-left server column
-  const pinnedDmShortcuts = allDmItems.filter((item) => item.isPinned);
+  const pinnedDmShortcuts = allDmItems.filter((item) => item.isPinned && !item.isSelf);
 
   // Loading screen tip index
   const [currentTipIndex, setCurrentTipIndex] = useState(0);
@@ -721,11 +883,14 @@ export default function App() {
       draftAvatar !== avatarPreview ||
       draftBanner !== bannerPreview);
 
-  // Close fullscreen settings, image preview lightbox, reply or crop modal on Escape key
+  // Close fullscreen settings, image preview lightbox, reply, server member modal or crop modal on Escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (previewImageUrl) {
+        if (selectedServerMember) {
+          setSelectedServerMember(null);
+          setShowMemberMoreMenu(false);
+        } else if (previewImageUrl) {
           setPreviewImageUrl(null);
         } else if (replyTarget) {
           setReplyTarget(null);
@@ -743,7 +908,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [previewImageUrl, replyTarget, isSettingsOpen, cropModal, regDisplayName, pronouns, aboutMe, avatarPreview, bannerPreview]);
+  }, [selectedServerMember, previewImageUrl, replyTarget, isSettingsOpen, cropModal, regDisplayName, pronouns, aboutMe, avatarPreview, bannerPreview]);
 
   // Scroll to bottom when self messages change
   useEffect(() => {
@@ -2183,8 +2348,7 @@ export default function App() {
                 addFriendStatus={addFriendStatus}
                 isAddingFriend={isAddingFriend}
                 onOpenDm={(friendUser) => {
-                  setDmTab('dms');
-                  setSelectedDm(friendUser);
+                  handleOpenUserDm(friendUser);
                 }}
                 onRemoveFriend={handleRemoveFriendAction}
                 onAcceptFriendRequest={handleAcceptFriendRequestAction}
@@ -2387,9 +2551,9 @@ export default function App() {
                           </button>
                         </div>
 
-                        <div className="absolute left-4 -bottom-10 z-20">
+                        <div className="absolute left-4 -bottom-10 z-30 pointer-events-auto">
                           <div className="relative">
-                            <div className="w-20 h-20 rounded-full bg-[#111214] ring-4 ring-[#18191c] overflow-hidden flex items-center justify-center text-white shadow-md">
+                            <div className="w-20 h-20 rounded-full bg-[#111214] ring-[6px] ring-[#18191c] overflow-hidden flex items-center justify-center text-white shadow-2xl">
                               {avatarPreview ? (
                                 <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
                               ) : (
@@ -2397,7 +2561,7 @@ export default function App() {
                               )}
                             </div>
                             <div
-                              className={`absolute bottom-0.5 right-0.5 w-5 h-5 rounded-full border-4 border-[#18191c] z-30 ${
+                              className={`absolute bottom-0.5 right-0.5 w-5 h-5 rounded-full border-4 border-[#18191c] z-40 ${
                                 STATUS_CONFIG[userStatus].bgClass
                               }`}
                               title={STATUS_CONFIG[userStatus].label}
@@ -2406,7 +2570,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      <div className="pt-12 px-4 pb-4 relative flex-1 overflow-y-auto">
+                      <div className="pt-12 px-4 pb-4 relative z-10 flex-1 overflow-y-auto">
                         <div className="mb-3">
                           <h3 className="text-white font-bold text-[18px] leading-tight truncate">
                             {currentDisplayName}
@@ -2448,170 +2612,304 @@ export default function App() {
               </div>
             ) : (
               /* FRIEND 1-ON-1 DIRECT MESSAGE CHAT */
-              <div className="flex flex-col h-full w-full">
-                {/* Chat Header Bar */}
-                <div className="h-12 border-b border-[#18191c] bg-[#18191c] px-4 flex items-center justify-between flex-shrink-0 shadow-xs z-10">
-                  <div className="flex items-center gap-3">
-                    <span className="text-[#949ba4] font-bold text-[18px]">@</span>
-                    <span className="font-bold text-white text-[15px]">
-                      {selectedFriend?.displayName || selectedDm}
-                    </span>
-                    {selectedFriend && (
-                      <>
-                        <div
-                          className={`w-2.5 h-2.5 rounded-full ${
-                            (STATUS_CONFIG[selectedFriend.status || 'offline'] || STATUS_CONFIG.offline).bgClass
-                          }`}
-                          title={(STATUS_CONFIG[selectedFriend.status || 'offline'] || STATUS_CONFIG.offline).label}
-                        />
-                        <span className="text-[12px] text-[#949ba4]">
-                          {(STATUS_CONFIG[selectedFriend.status || 'offline'] || STATUS_CONFIG.offline).label}
+              (() => {
+                const targetUserProfile: UserProfile =
+                  allUsers.find((u) => u.username.toLowerCase() === selectedDm.toLowerCase()) || {
+                    id: selectedFriend?.id || selectedDm.toLowerCase(),
+                    username: selectedFriend?.username || selectedDm,
+                    displayName: selectedFriend?.displayName || selectedDm,
+                    email: '',
+                    avatar: selectedFriend?.avatar || null,
+                    banner: null,
+                    pronouns: '',
+                    aboutMe: selectedFriend?.aboutMe || '',
+                    status: selectedFriend?.status || 'offline',
+                    isMuted: false,
+                    isDeafened: false,
+                    createdAt: selectedFriend?.addedAt || Date.now(),
+                    lastSeen: selectedFriend?.addedAt || Date.now()
+                  };
+                const statusInfo = STATUS_CONFIG[targetUserProfile.status || 'offline'] || STATUS_CONFIG.offline;
+
+                return (
+                  <div className="flex flex-col h-full w-full">
+                    {/* Chat Header Bar */}
+                    <div className="h-12 border-b border-[#18191c] bg-[#18191c] px-4 flex items-center justify-between flex-shrink-0 shadow-xs z-10">
+                      <div className="flex items-center gap-3">
+                        <span className="text-[#949ba4] font-bold text-[18px]">@</span>
+                        <span className="font-bold text-white text-[15px]">
+                          {targetUserProfile.displayName || targetUserProfile.username}
                         </span>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                {/* Messages history + Input */}
-                <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-[#111214]">
-                  <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
-                    {/* Beginning of conversation banner */}
-                    <div className="mb-8 select-none">
-                      <div className="w-20 h-20 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white ring-4 ring-[#232428] mb-3">
-                        {selectedFriend?.avatar ? (
-                          <img src={selectedFriend.avatar} alt="Avatar" className="w-full h-full object-cover" />
-                        ) : (
-                          <User className="w-10 h-10 text-[#ff6b00]" />
-                        )}
+                        <div
+                          className={`w-2.5 h-2.5 rounded-full ${statusInfo.bgClass}`}
+                          title={statusInfo.label}
+                        />
+                        <span className="text-[12px] text-[#949ba4]">{statusInfo.label}</span>
                       </div>
-                      <h2 className="text-3xl font-bold text-white mb-1.5">
-                        {selectedFriend?.displayName || selectedDm}
-                      </h2>
-                      <p className="text-[#dbdee1] text-[16px] font-medium mb-1">
-                        This is the beginning of your direct message history with @{selectedFriend?.username || selectedDm}.
-                      </p>
-                      <p className="text-[#949ba4] text-[14px]">
-                        Say hello and start yapping!
-                      </p>
-                      <div className="h-[1px] bg-[#232428] mt-6" />
-                    </div>
 
-                    {/* Messages in this DM */}
-                    {displayedDmMessages.map((msg) => (
-                      <ChatMessageItem
-                        key={msg.id}
-                        msg={msg}
-                        currentUsername={currentUsername}
-                        location="dm"
-                        onReply={(m) => setReplyTarget({ message: m, location: 'dm' })}
-                        onDelete={(m) => handleDeleteMessage(m, 'dm')}
-                        onToggleReaction={(m, emoji) => handleToggleReaction(m, emoji, 'dm')}
-                        onImageClick={(url) => setPreviewImageUrl(url)}
-                      />
-                    ))}
-                    <div ref={dmChatMessagesEndRef} />
-                  </div>
-
-                  {/* Chat Input Bar */}
-                  <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0">
-                    {/* Replying banner */}
-                    {replyTarget && replyTarget.location === 'dm' && (
-                      <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] px-3.5 py-1.5 flex items-center justify-between text-[12px] text-[#949ba4]">
-                        <div className="flex items-center gap-2 truncate">
-                          <Reply className="w-3.5 h-3.5 text-[#ff6b00] flex-shrink-0" />
-                          <span>Replying to</span>
-                          <span className="font-semibold text-white">
-                            @{replyTarget.message.authorDisplayName || replyTarget.message.authorUsername}
-                          </span>
-                          {replyTarget.message.text && (
-                            <span className="truncate max-w-xs text-[#80848e]">
-                              "{replyTarget.message.text}"
-                            </span>
-                          )}
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setReplyTarget(null)}
-                          className="p-1 text-[#949ba4] hover:text-white rounded-[3px] cursor-pointer"
-                          title="Cancel reply"
-                        >
-                          <X className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    )}
-
-                    {/* Attachment Preview Banner */}
-                    {dmAttachment && (
-                      <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] p-2.5 flex items-center gap-3">
-                        <div className="w-12 h-12 rounded-[4px] overflow-hidden bg-black/40 border border-[#2b2d31] flex items-center justify-center flex-shrink-0">
-                          <img src={dmAttachment.previewUrl} alt="Preview" className="w-full h-full object-cover" />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="text-[13px] font-medium text-white truncate">{dmAttachment.name}</div>
-                          <div className="text-[11px] text-[#ff6b00]">Image / GIF ready to upload</div>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setDmAttachment(null)}
-                          className="p-1 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white cursor-pointer mr-2"
-                          title="Remove attachment"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                      </div>
-                    )}
-
-                    <form
-                      onSubmit={handleSendDmMessage}
-                      className={`bg-[#1e1f22] border border-transparent focus-within:border-[#ff6b00]/40 flex items-center px-4 py-2.5 transition-colors ${
-                        replyTarget || dmAttachment ? 'rounded-b-[8px]' : 'rounded-[8px]'
-                      }`}
-                    >
+                      {/* Profile Toggle button on top-right */}
                       <button
                         type="button"
-                        onClick={() => dmFileInputRef.current?.click()}
-                        className="w-6 h-6 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white flex items-center justify-center transition-colors cursor-pointer flex-shrink-0 mr-3"
-                        title="Upload Image or GIF (no MP4)"
+                        onClick={() => setShowProfilePanel(!showProfilePanel)}
+                        className={`p-1.5 rounded-[4px] transition-colors cursor-pointer ${
+                          showProfilePanel
+                            ? 'text-white bg-[#2b2d31]'
+                            : 'text-[#949ba4] hover:text-[#dbdee1] hover:bg-[#232428]'
+                        }`}
+                        title={showProfilePanel ? 'Hide User Profile' : 'Show User Profile'}
                       >
-                        <Plus className="w-4 h-4 stroke-[2.5]" />
+                        <User className="w-5 h-5" />
                       </button>
+                    </div>
 
-                      <input
-                        type="text"
-                        value={chatInput}
-                        onChange={(e) => setChatInput(e.target.value)}
-                        placeholder={`Message @${selectedFriend?.displayName || selectedDm}`}
-                        className="bg-transparent text-white placeholder-[#949ba4] text-[15px] outline-none flex-1 pr-3"
-                      />
+                    {/* Chat & Profile Main Area below header */}
+                    <div className="flex-1 flex min-h-0 relative overflow-hidden">
+                      <div
+                        className={`flex-1 flex flex-col min-h-0 min-w-0 transition-[margin] duration-200 ease-out ${
+                          showProfilePanel ? 'mr-[326px]' : 'mr-0'
+                        }`}
+                      >
+                        {/* Messages history + Input */}
+                        <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
+                          {/* Beginning of conversation banner */}
+                          <div className="mb-8 select-none">
+                            <div className="w-20 h-20 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white ring-4 ring-[#232428] mb-3">
+                              {targetUserProfile.avatar ? (
+                                <img src={targetUserProfile.avatar} alt="Avatar" className="w-full h-full object-cover" />
+                              ) : (
+                                <User className="w-10 h-10 text-[#ff6b00]" />
+                              )}
+                            </div>
+                            <h2 className="text-3xl font-bold text-white mb-1.5">
+                              {targetUserProfile.displayName || targetUserProfile.username}
+                            </h2>
+                            <p className="text-[#dbdee1] text-[16px] font-medium mb-1">
+                              This is the beginning of your direct message history with @{targetUserProfile.username}.
+                            </p>
+                            <p className="text-[#949ba4] text-[14px]">
+                              Say hello and start yapping!
+                            </p>
+                            <div className="h-[1px] bg-[#232428] mt-6" />
+                          </div>
 
-                      <div className="flex items-center gap-2 text-[#949ba4]">
-                        <button
-                          type="button"
-                          onClick={() => setChatInput((prev) => prev + ' 😊')}
-                          className="hover:text-white transition-colors cursor-pointer p-1"
-                          title="Insert Emoji"
-                        >
-                          <Smile className="w-5 h-5" />
-                        </button>
-                        {(chatInput.trim() || dmAttachment) && (
-                          <button
-                            type="submit"
-                            disabled={isUploadingAttachment}
-                            className="p-1 text-[#ff6b00] hover:text-[#e55b00] disabled:opacity-50 transition-colors cursor-pointer"
-                            title="Send Message"
+                          {/* Messages in this DM */}
+                          {displayedDmMessages.map((msg) => (
+                            <ChatMessageItem
+                              key={msg.id}
+                              msg={msg}
+                              currentUsername={currentUsername}
+                              location="dm"
+                              onReply={(m) => setReplyTarget({ message: m, location: 'dm' })}
+                              onDelete={(m) => handleDeleteMessage(m, 'dm')}
+                              onToggleReaction={(m, emoji) => handleToggleReaction(m, emoji, 'dm')}
+                              onImageClick={(url) => setPreviewImageUrl(url)}
+                              onAuthorClick={(authorUsername) => {
+                                const u = allUsers.find(
+                                  (user) => user.username.toLowerCase() === authorUsername.toLowerCase()
+                                );
+                                if (u) {
+                                  const isCurrent = u.username.toLowerCase() === currentUsername.toLowerCase();
+                                  setSelectedServerMember(
+                                    isCurrent
+                                      ? {
+                                          ...u,
+                                          displayName: currentDisplayName,
+                                          avatar: avatarPreview,
+                                          banner: bannerPreview,
+                                          status: userStatus,
+                                          aboutMe,
+                                          pronouns
+                                        }
+                                      : u
+                                  );
+                                  setShowMemberMoreMenu(false);
+                                  setMemberModalFeedback(null);
+                                }
+                              }}
+                            />
+                          ))}
+                          <div ref={dmChatMessagesEndRef} />
+                        </div>
+
+                        {/* Chat Input Bar */}
+                        <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0">
+                          {/* Replying banner */}
+                          {replyTarget && replyTarget.location === 'dm' && (
+                            <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] px-3.5 py-1.5 flex items-center justify-between text-[12px] text-[#949ba4]">
+                              <div className="flex items-center gap-2 truncate">
+                                <Reply className="w-3.5 h-3.5 text-[#ff6b00] flex-shrink-0" />
+                                <span>Replying to</span>
+                                <span className="font-semibold text-white">
+                                  @{replyTarget.message.authorDisplayName || replyTarget.message.authorUsername}
+                                </span>
+                                {replyTarget.message.text && (
+                                  <span className="truncate max-w-xs text-[#80848e]">
+                                    "{replyTarget.message.text}"
+                                  </span>
+                                )}
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setReplyTarget(null)}
+                                className="p-1 text-[#949ba4] hover:text-white rounded-[3px] cursor-pointer"
+                                title="Cancel reply"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
+
+                          {/* Attachment Preview Banner */}
+                          {dmAttachment && (
+                            <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] p-2.5 flex items-center gap-3">
+                              <div className="w-12 h-12 rounded-[4px] overflow-hidden bg-black/40 border border-[#2b2d31] flex items-center justify-center flex-shrink-0">
+                                <img src={dmAttachment.previewUrl} alt="Preview" className="w-full h-full object-cover" />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-[13px] font-medium text-white truncate">{dmAttachment.name}</div>
+                                <div className="text-[11px] text-[#ff6b00]">Image / GIF ready to upload</div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setDmAttachment(null)}
+                                className="p-1 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white cursor-pointer mr-2"
+                                title="Remove attachment"
+                              >
+                                <X className="w-4 h-4" />
+                              </button>
+                            </div>
+                          )}
+
+                          <form
+                            onSubmit={handleSendDmMessage}
+                            className={`bg-[#1e1f22] border border-transparent focus-within:border-[#ff6b00]/40 flex items-center px-4 py-2.5 transition-colors ${
+                              replyTarget || dmAttachment ? 'rounded-b-[8px]' : 'rounded-[8px]'
+                            }`}
                           >
-                            {isUploadingAttachment ? (
-                              <Loader2 className="w-4 h-4 animate-spin" />
-                            ) : (
-                              <Send className="w-4 h-4" />
-                            )}
-                          </button>
-                        )}
+                            <button
+                              type="button"
+                              onClick={() => dmFileInputRef.current?.click()}
+                              className="w-6 h-6 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white flex items-center justify-center transition-colors cursor-pointer flex-shrink-0 mr-3"
+                              title="Upload Image or GIF (no MP4)"
+                            >
+                              <Plus className="w-4 h-4 stroke-[2.5]" />
+                            </button>
+
+                            <input
+                              type="text"
+                              value={chatInput}
+                              onChange={(e) => setChatInput(e.target.value)}
+                              placeholder={`Message @${targetUserProfile.displayName || targetUserProfile.username}`}
+                              className="bg-transparent text-white placeholder-[#949ba4] text-[15px] outline-none flex-1 pr-3"
+                            />
+
+                            <div className="flex items-center gap-2 text-[#949ba4]">
+                              <button
+                                type="button"
+                                onClick={() => setChatInput((prev) => prev + ' 😊')}
+                                className="hover:text-white transition-colors cursor-pointer p-1"
+                                title="Insert Emoji"
+                              >
+                                <Smile className="w-5 h-5" />
+                              </button>
+                              {(chatInput.trim() || dmAttachment) && (
+                                <button
+                                  type="submit"
+                                  disabled={isUploadingAttachment}
+                                  className="p-1 text-[#ff6b00] hover:text-[#e55b00] disabled:opacity-50 transition-colors cursor-pointer"
+                                  title="Send Message"
+                                >
+                                  {isUploadingAttachment ? (
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                  ) : (
+                                    <Send className="w-4 h-4" />
+                                  )}
+                                </button>
+                              )}
+                            </div>
+                          </form>
+                        </div>
                       </div>
-                    </form>
+
+                      {/* USER PROFILE CARD ON THE RIGHT */}
+                      {showProfilePanel && (
+                        <div className="absolute right-4 top-2 bottom-4 w-[310px] max-w-[calc(100vw-360px)] bg-[#18191c] border border-[#232428] rounded-[8px] shadow-2xl flex flex-col overflow-hidden z-20 animate-in fade-in duration-150 select-none">
+                          <div className="relative flex-shrink-0">
+                            <div className="h-28 bg-[#1f2023] overflow-hidden relative">
+                              {targetUserProfile.banner ? (
+                                <img src={targetUserProfile.banner} alt="Profile Banner" className="w-full h-full object-cover" />
+                              ) : (
+                                <div className="w-full h-full bg-gradient-to-r from-[#232428] to-[#1e1f22]" />
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setShowProfilePanel(false)}
+                                className="absolute top-2.5 right-2.5 w-6 h-6 rounded-full bg-black/60 hover:bg-black/80 text-[#dbdee1] hover:text-white flex items-center justify-center transition-colors cursor-pointer z-30"
+                                title="Close panel"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+
+                            <div className="absolute left-4 -bottom-10 z-30 pointer-events-auto">
+                              <div className="relative">
+                                <div className="w-20 h-20 rounded-full bg-[#111214] ring-[6px] ring-[#18191c] overflow-hidden flex items-center justify-center text-white shadow-2xl">
+                                  {targetUserProfile.avatar ? (
+                                    <img src={targetUserProfile.avatar} alt="Avatar" className="w-full h-full object-cover" />
+                                  ) : (
+                                    <User className="w-10 h-10 text-[#dbdee1]" />
+                                  )}
+                                </div>
+                                <div
+                                  className={`absolute bottom-0.5 right-0.5 w-5 h-5 rounded-full border-4 border-[#18191c] z-40 ${statusInfo.bgClass}`}
+                                  title={statusInfo.label}
+                                />
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="pt-12 px-4 pb-4 relative z-10 flex-1 overflow-y-auto">
+                            <div className="mb-3">
+                              <h3 className="text-white font-bold text-[18px] leading-tight truncate">
+                                {targetUserProfile.displayName || targetUserProfile.username}
+                              </h3>
+                              <div className="text-[#949ba4] text-[13px] flex items-center gap-1.5 mt-1 font-normal">
+                                <span>@{targetUserProfile.username}</span>
+                                {targetUserProfile.pronouns && (
+                                  <>
+                                    <span className="text-[#949ba4]">•</span>
+                                    <span className="text-[#dbdee1]">{targetUserProfile.pronouns}</span>
+                                  </>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="h-[1px] bg-[#232428] my-3.5" />
+
+                            <div className="mb-4">
+                              <div className="text-[12px] font-bold text-[#b5bac1] uppercase tracking-wider mb-1.5">
+                                About Me
+                              </div>
+                              <p className="text-[13px] text-[#dbdee1] leading-relaxed whitespace-pre-wrap">
+                                {targetUserProfile.aboutMe || 'Hey there! Using Yapzo.'}
+                              </p>
+                            </div>
+
+                            <div className="mb-4">
+                              <div className="text-[12px] font-bold text-[#b5bac1] uppercase tracking-wider mb-1">
+                                Member Since
+                              </div>
+                              <p className="text-[13px] text-[#dbdee1]">
+                                Oct 24, 2026
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </div>
+                );
+              })()
             )
           ) : activeServerId === 'yapzo-hq' ? (
             /* YAPZO HQ SERVER VIEW (CHANNELS + REAL PLAYER LIST) */
@@ -2677,6 +2975,29 @@ export default function App() {
                         onDelete={(m) => handleDeleteMessage(m, 'channel')}
                         onToggleReaction={(m, emoji) => handleToggleReaction(m, emoji, 'channel')}
                         onImageClick={(url) => setPreviewImageUrl(url)}
+                        onAuthorClick={(authorUsername) => {
+                          const u = allUsers.find(
+                            (user) => user.username.toLowerCase() === authorUsername.toLowerCase()
+                          );
+                          if (u) {
+                            const isCurrent = u.username.toLowerCase() === currentUsername.toLowerCase();
+                            setSelectedServerMember(
+                              isCurrent
+                                ? {
+                                    ...u,
+                                    displayName: currentDisplayName,
+                                    avatar: avatarPreview,
+                                    banner: bannerPreview,
+                                    status: userStatus,
+                                    aboutMe,
+                                    pronouns
+                                  }
+                                : u
+                            );
+                            setShowMemberMoreMenu(false);
+                            setMemberModalFeedback(null);
+                          }
+                        }}
                       />
                     ))}
                     <div ref={channelMessagesEndRef} />
@@ -2828,6 +3149,23 @@ export default function App() {
                           return (
                             <div
                               key={u.username}
+                              onClick={() => {
+                                setSelectedServerMember(
+                                  isCurrent
+                                    ? {
+                                        ...u,
+                                        displayName: currentDisplayName,
+                                        avatar: avatarPreview,
+                                        banner: bannerPreview,
+                                        status: userStatus,
+                                        aboutMe,
+                                        pronouns
+                                      }
+                                    : u
+                                );
+                                setShowMemberMoreMenu(false);
+                                setMemberModalFeedback(null);
+                              }}
                               className="flex items-center gap-3 px-2 py-1.5 rounded-[4px] hover:bg-[#232428]/80 cursor-pointer group transition-colors"
                             >
                               <div className="relative flex-shrink-0">
@@ -2879,6 +3217,23 @@ export default function App() {
                               return (
                                 <div
                                   key={u.username}
+                                  onClick={() => {
+                                    setSelectedServerMember(
+                                      isCurrent
+                                        ? {
+                                            ...u,
+                                            displayName: currentDisplayName,
+                                            avatar: avatarPreview,
+                                            banner: bannerPreview,
+                                            status: userStatus,
+                                            aboutMe,
+                                            pronouns
+                                          }
+                                        : u
+                                    );
+                                    setShowMemberMoreMenu(false);
+                                    setMemberModalFeedback(null);
+                                  }}
                                   className="flex items-center gap-3 px-2 py-1.5 rounded-[4px] hover:bg-[#232428]/80 cursor-pointer group transition-colors opacity-60 hover:opacity-100"
                                 >
                                   <div className="relative flex-shrink-0">
@@ -3275,6 +3630,264 @@ export default function App() {
           accept="image/png,image/jpeg,image/webp,image/gif"
           className="hidden"
         />
+
+        {/* DM RIGHT-CLICK CONTEXT MENU MODAL */}
+        {dmContextMenu && (
+          <div
+            className="fixed inset-0 z-[100] select-none"
+            onClick={() => setDmContextMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              setDmContextMenu(null);
+            }}
+          >
+            <div
+              style={{
+                left: `${Math.min(dmContextMenu.x, window.innerWidth - 220)}px`,
+                top: `${Math.min(dmContextMenu.y, window.innerHeight - 160)}px`
+              }}
+              className="fixed w-52 bg-[#111214] border border-[#232428] rounded-[8px] shadow-2xl p-1.5 z-[101] animate-in fade-in zoom-in-95 duration-100"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Context Menu Header */}
+              <div className="px-2.5 py-2 border-b border-[#232428] mb-1 flex items-center gap-2.5">
+                <div className="w-7 h-7 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white flex-shrink-0 ring-1 ring-[#232428]">
+                  {dmContextMenu.targetAvatar ? (
+                    <img src={dmContextMenu.targetAvatar} alt="PFP" className="w-full h-full object-cover" />
+                  ) : (
+                    <User className="w-3.5 h-3.5 text-[#ff6b00]" />
+                  )}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="text-white text-[13px] font-bold truncate">{dmContextMenu.targetDisplayName}</p>
+                  <p className="text-[#949ba4] text-[11px] truncate">@{dmContextMenu.targetDm}</p>
+                </div>
+              </div>
+
+              {/* Pin / Unpin Option */}
+              <button
+                type="button"
+                onClick={() => handleTogglePinDm(dmContextMenu.targetDm)}
+                className="w-full flex items-center gap-2.5 px-2.5 py-2 text-[13px] font-medium text-[#dbdee1] hover:bg-[#ff6b00] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left group"
+              >
+                {localPinnedDms[dmContextMenu.targetDm.toLowerCase()] ? (
+                  <PinOff className="w-4 h-4 text-[#ff6b00] group-hover:text-white" />
+                ) : (
+                  <Pin className="w-4 h-4 text-[#ff6b00] group-hover:text-white" />
+                )}
+                <span>{localPinnedDms[dmContextMenu.targetDm.toLowerCase()] ? 'Unpin DM' : 'Pin DM'}</span>
+              </button>
+
+              {/* Delete DM Option */}
+              <button
+                type="button"
+                onClick={() => handleDeleteDm(dmContextMenu.targetDm)}
+                className="w-full flex items-center gap-2.5 px-2.5 py-2 text-[13px] font-medium text-[#f23f43] hover:bg-[#f23f43] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left group"
+              >
+                <Trash2 className="w-4 h-4 text-[#f23f43] group-hover:text-white" />
+                <span>Delete DM</span>
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* CENTER SERVER MEMBER PROFILE MODAL */}
+        {selectedServerMember && (() => {
+          const isSelf = selectedServerMember.username.toLowerCase() === currentUsername.toLowerCase();
+          const isAlreadyFriend = friends.some(
+            (f) => f.username.toLowerCase() === selectedServerMember.username.toLowerCase() &&
+            (!f.requestStatus || f.requestStatus === 'accepted')
+          );
+          const isFriendPending = friends.some(
+            (f) => f.username.toLowerCase() === selectedServerMember.username.toLowerCase() &&
+            f.requestStatus?.startsWith('pending')
+          );
+          const statusInfo = STATUS_CONFIG[selectedServerMember.status || 'offline'] || STATUS_CONFIG.offline;
+
+          return (
+            <div
+              className="fixed inset-0 z-[110] bg-black/60 backdrop-blur-xs flex items-center justify-center p-4 select-none animate-in fade-in duration-150"
+              onClick={() => {
+                setSelectedServerMember(null);
+                setShowMemberMoreMenu(false);
+              }}
+            >
+              <div
+                className="w-full max-w-[340px] bg-[#18191c] border border-[#232428] rounded-[12px] shadow-2xl overflow-hidden flex flex-col relative animate-in zoom-in-95 duration-150"
+                onClick={(e) => e.stopPropagation()}
+              >
+                {/* Banner Wrapper */}
+                <div className="relative flex-shrink-0">
+                  <div className="h-28 bg-[#1f2023] overflow-hidden relative">
+                    {selectedServerMember.banner ? (
+                      <img
+                        src={selectedServerMember.banner}
+                        alt="Banner"
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-gradient-to-r from-[#ff6b00]/20 via-[#232428] to-[#1e1f22]" />
+                    )}
+
+                    {/* Top Right Buttons: "..." and Close */}
+                    <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 z-30">
+                      {/* "..." More menu button */}
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => setShowMemberMoreMenu(!showMemberMoreMenu)}
+                          className="w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-[#dbdee1] hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                          title="More options"
+                        >
+                          <MoreHorizontal className="w-4 h-4" />
+                        </button>
+
+                        {/* Popup menu with Add Friend option */}
+                        {showMemberMoreMenu && (
+                          <div
+                            className="absolute right-0 top-8.5 w-44 bg-[#111214] border border-[#232428] rounded-[6px] shadow-2xl p-1 z-40 animate-in fade-in zoom-in-95 duration-100"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <button
+                              type="button"
+                              disabled={isSelf || isAlreadyFriend || isFriendPending}
+                              onClick={() => handleAddFriendFromModal(selectedServerMember)}
+                              className="w-full flex items-center gap-2 px-2.5 py-2 text-[13px] font-medium text-[#dbdee1] hover:bg-[#ff6b00] hover:text-white disabled:opacity-50 disabled:hover:bg-transparent disabled:hover:text-[#dbdee1] rounded-[4px] transition-colors cursor-pointer text-left group"
+                            >
+                              <UserPlus className="w-4 h-4 text-[#ff6b00] group-hover:text-white" />
+                              <span>
+                                {isSelf
+                                  ? 'This is you'
+                                  : isAlreadyFriend
+                                  ? 'Already Friends'
+                                  : isFriendPending
+                                  ? 'Request Pending'
+                                  : 'Add Friend'}
+                              </span>
+                            </button>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Close button */}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedServerMember(null);
+                          setShowMemberMoreMenu(false);
+                        }}
+                        className="w-7 h-7 rounded-full bg-black/60 hover:bg-black/80 text-[#dbdee1] hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                        title="Close"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Overlapping Avatar - In front of banner and body */}
+                  <div className="absolute left-4 -bottom-10 z-30 pointer-events-auto">
+                    <div className="relative">
+                      <div className="w-20 h-20 rounded-full bg-[#111214] ring-[6px] ring-[#18191c] overflow-hidden flex items-center justify-center text-white shadow-2xl">
+                        {selectedServerMember.avatar ? (
+                          <img
+                            src={selectedServerMember.avatar}
+                            alt={selectedServerMember.displayName}
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <User className="w-10 h-10 text-[#dbdee1]" />
+                        )}
+                      </div>
+                      <div
+                        className={`absolute bottom-0.5 right-0.5 w-5 h-5 rounded-full border-4 border-[#18191c] z-40 ${statusInfo.bgClass}`}
+                        title={statusInfo.label}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Content details */}
+                <div className="pt-12 px-4 pb-4 relative z-10 flex-1 flex flex-col">
+                  <div className="mb-3">
+                    <h3 className="text-white font-bold text-[18px] leading-tight truncate">
+                      {selectedServerMember.displayName || selectedServerMember.username}
+                    </h3>
+                    <div className="text-[#949ba4] text-[13px] flex items-center gap-1.5 mt-1 font-normal">
+                      <span>@{selectedServerMember.username}</span>
+                      {selectedServerMember.pronouns && (
+                        <>
+                          <span className="text-[#949ba4]">•</span>
+                          <span className="text-[#dbdee1]">{selectedServerMember.pronouns}</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Toast feedback if Add Friend was clicked */}
+                  {memberModalFeedback && (
+                    <div className="mb-3 p-2 rounded-[4px] bg-[#23a55a]/15 border border-[#23a55a]/40 text-[#2ecc71] text-[12px] flex items-center gap-1.5 animate-in fade-in duration-150">
+                      <Check className="w-3.5 h-3.5 flex-shrink-0" />
+                      <span className="truncate">{memberModalFeedback}</span>
+                    </div>
+                  )}
+
+                  <div className="h-[1px] bg-[#232428] my-2" />
+
+                  {/* About Me */}
+                  <div className="mb-3">
+                    <div className="text-[11px] font-bold text-[#b5bac1] uppercase tracking-wider mb-1">
+                      About Me
+                    </div>
+                    <p className="text-[13px] text-[#dbdee1] leading-relaxed whitespace-pre-wrap">
+                      {selectedServerMember.aboutMe || 'Hey there! Using Yapzo.'}
+                    </p>
+                  </div>
+
+                  {/* Member Since */}
+                  <div className="mb-4">
+                    <div className="text-[11px] font-bold text-[#b5bac1] uppercase tracking-wider mb-1">
+                      Member Since
+                    </div>
+                    <p className="text-[13px] text-[#dbdee1]">
+                      Oct 24, 2026
+                    </p>
+                  </div>
+
+                  {/* Bottom Action: Message button */}
+                  <div className="mt-auto pt-2">
+                    {!isSelf ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedServerMember(null);
+                          setShowMemberMoreMenu(false);
+                          handleOpenUserDm(selectedServerMember.username);
+                        }}
+                        className="w-full py-2.5 px-4 bg-[#ff6b00] hover:bg-[#e55b00] text-white font-semibold text-[14px] rounded-[6px] transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md hover:shadow-[0_0_12px_rgba(255,107,0,0.35)]"
+                      >
+                        <MessageSquare className="w-4 h-4" />
+                        <span>Message</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedServerMember(null);
+                          setShowMemberMoreMenu(false);
+                          openSettings();
+                        }}
+                        className="w-full py-2.5 px-4 bg-[#2b2d31] hover:bg-[#35373c] text-white font-medium text-[14px] rounded-[6px] transition-colors flex items-center justify-center gap-2 cursor-pointer"
+                      >
+                        <Settings className="w-4 h-4 text-[#ff6b00]" />
+                        <span>Edit Profile</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </div>
     );
   }
@@ -4011,62 +4624,6 @@ export default function App() {
               Already have an account?
             </button>
           </form>
-        </div>
-      )}
-
-      {/* DM RIGHT-CLICK CONTEXT MENU MODAL */}
-      {dmContextMenu && (
-        <div
-          className="fixed inset-0 z-[100] select-none"
-          onClick={() => setDmContextMenu(null)}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            setDmContextMenu(null);
-          }}
-        >
-          <div
-            style={{
-              left: `${Math.min(dmContextMenu.x, window.innerWidth - 220)}px`,
-              top: `${Math.min(dmContextMenu.y, window.innerHeight - 160)}px`
-            }}
-            className="fixed w-52 bg-[#111214] border border-[#232428] rounded-[8px] shadow-2xl p-1.5 z-[101] animate-in fade-in zoom-in-95 duration-100"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Context Menu Header */}
-            <div className="px-2.5 py-2 border-b border-[#232428] mb-1 flex items-center gap-2.5">
-              <div className="w-7 h-7 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white flex-shrink-0 ring-1 ring-[#232428]">
-                {dmContextMenu.targetAvatar ? (
-                  <img src={dmContextMenu.targetAvatar} alt="PFP" className="w-full h-full object-cover" />
-                ) : (
-                  <User className="w-3.5 h-3.5 text-[#ff6b00]" />
-                )}
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-white text-[13px] font-bold truncate">{dmContextMenu.targetDisplayName}</p>
-                <p className="text-[#949ba4] text-[11px] truncate">@{dmContextMenu.targetDm}</p>
-              </div>
-            </div>
-
-            {/* Pin / Unpin Option */}
-            <button
-              type="button"
-              onClick={() => handleTogglePinDm(dmContextMenu.targetDm)}
-              className="w-full flex items-center gap-2.5 px-2.5 py-2 text-[13px] font-medium text-[#dbdee1] hover:bg-[#ff6b00] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left group"
-            >
-              <Pin className="w-4 h-4 text-[#ff6b00] group-hover:text-white" />
-              <span>{localPinnedDms[dmContextMenu.targetDm.toLowerCase()] ? 'Unpin DM' : 'Pin DM'}</span>
-            </button>
-
-            {/* Clear DM Chat Option */}
-            <button
-              type="button"
-              onClick={() => handleClearDmChat(dmContextMenu.targetDm)}
-              className="w-full flex items-center gap-2.5 px-2.5 py-2 text-[13px] font-medium text-[#f23f43] hover:bg-[#f23f43] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left"
-            >
-              <Trash2 className="w-4 h-4" />
-              <span>Clear DM Chat</span>
-            </button>
-          </div>
         </div>
       )}
     </div>
