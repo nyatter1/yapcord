@@ -77,9 +77,9 @@ import {
 } from './lib/database';
 import {
   ServerSettingsData,
+  ServerRole,
   DEFAULT_SERVER_SETTINGS,
   subscribeToServerSettings,
-  filterProfanity,
   checkUserPermissions
 } from './lib/serverSettings';
 import { ChatMessageItem } from './components/ChatMessageItem';
@@ -538,6 +538,19 @@ export default function App() {
 
   // Total server mentions count across all channels
   const totalServerPings = Object.values(channelUnreadPings).reduce((sum, count) => sum + count, 0);
+
+  // Server permissions check for current user (Owner & Manage Server)
+  const isServerOwner =
+    (regEmail || loginEmail || '').trim().toLowerCase() === (serverSettings.ownerEmail || 'hayden@gmail.com').trim().toLowerCase() ||
+    currentUsername.toLowerCase() === 'hayden';
+
+  const currentUserPerms = checkUserPermissions(
+    regEmail || loginEmail || '',
+    currentUsername,
+    serverSettings
+  );
+
+  const canManageServer = isServerOwner || currentUserPerms.canManageServer || currentUserPerms.isAdmin;
 
   // Play notification sound helper:
   // "when u get a notifcation the sound notifcation.mp3 will play now when ur on dnd u do not get no notification sound it just shows the amount of timesu was pinged."
@@ -1787,17 +1800,9 @@ export default function App() {
       }
     }
 
-    // Server profanity filter check
-    const profanity = filterProfanity(text, serverSettings.profanityFilter);
-    if (profanity.hasProfanity && serverSettings.profanityFilter?.action === 'block') {
-      alert(`Message blocked by AutoMod: Contains prohibited language (${profanity.detectedWords.join(', ')}).`);
-      return;
-    }
-    const cleanText = profanity.filteredText;
-
     const currentMsg: Omit<ChatMessage, 'id'> = {
       channelId: activeChannelId,
-      text: cleanText,
+      text: text,
       imageUrl: uploadedImageUrl || null,
       authorId: currentUsername,
       authorUsername: currentUsername,
@@ -2321,14 +2326,22 @@ export default function App() {
                   setActiveServerId('yapzo-hq');
                   setShowServerMenu(false);
                 }}
-                className={`w-12 h-12 flex items-center justify-center transition-all duration-200 cursor-pointer font-bold select-none text-[14px] tracking-wide relative ${
+                className={`w-12 h-12 flex items-center justify-center transition-all duration-200 cursor-pointer font-bold select-none text-[14px] tracking-wide relative overflow-hidden ${
                   !isHomeSelected && activeServerId === 'yapzo-hq'
                     ? 'rounded-[16px] bg-[#ff6b00] text-white shadow-[0_0_16px_rgba(255,107,0,0.4)]'
                     : 'rounded-[24px] hover:rounded-[16px] bg-[#18191c] hover:bg-[#ff6b00] text-[#dbdee1] hover:text-white'
                 }`}
-                title="Yapzo HQ"
+                title={serverSettings.name || 'Yapzo HQ'}
               >
-                <span>YHQ</span>
+                {serverSettings.icon ? (
+                  <img
+                    src={serverSettings.icon}
+                    alt={serverSettings.name || 'Server Icon'}
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <span>YHQ</span>
+                )}
 
                 {/* Server Notification Dot Badge: (1) or (99+) */}
                 {totalServerPings > 0 && (
@@ -2644,87 +2657,73 @@ export default function App() {
               {/* SERVER HEADER: Yapzo HQ with Dropdown */}
               <div className="relative flex-shrink-0" ref={serverDropdownRef}>
                 <div
-                  onClick={() => setShowServerDropdown(!showServerDropdown)}
-                  className="h-12 border-b border-[#111214] px-4 font-bold text-white flex items-center justify-between hover:bg-[#232428]/60 cursor-pointer transition-colors shadow-xs select-none"
+                  onClick={() => {
+                    if (canManageServer) {
+                      setShowServerDropdown(!showServerDropdown);
+                    }
+                  }}
+                  className={`h-12 border-b border-[#111214] px-4 font-bold text-white flex items-center justify-between ${
+                    canManageServer ? 'hover:bg-[#232428]/60 cursor-pointer' : 'cursor-default'
+                  } transition-colors shadow-xs select-none`}
                 >
                   <div className="flex items-center gap-2 truncate">
                     <span className="truncate text-[15px] font-bold">{serverSettings.name || 'Yapzo HQ'}</span>
-                    {((regEmail || loginEmail || '').toLowerCase() === (serverSettings.ownerEmail || 'hayden@gmail.com').toLowerCase()) && (
-                      <span title="You are Server Owner">
+                    {isServerOwner && (
+                      <span title="Server Owner">
                         <Crown className="w-4 h-4 text-[#f0b232] flex-shrink-0" />
                       </span>
                     )}
                   </div>
-                  <ChevronDown
-                    className={`w-4 h-4 text-[#949ba4] flex-shrink-0 transition-transform duration-200 ${
-                      showServerDropdown ? 'rotate-180 text-white' : ''
-                    }`}
-                  />
+                  {canManageServer && (
+                    <ChevronDown
+                      className={`w-4 h-4 text-[#949ba4] flex-shrink-0 transition-transform duration-200 ${
+                        showServerDropdown ? 'rotate-180 text-white' : ''
+                      }`}
+                    />
+                  )}
                 </div>
 
-                {/* DISCORD SERVER DROPDOWN MENU */}
-                {showServerDropdown && (
-                  <div className="absolute left-2 right-2 top-14 bg-[#111214] border border-[#232428] rounded-[6px] shadow-2xl p-1.5 z-50 animate-in fade-in zoom-in-95 duration-100 space-y-0.5">
+                {/* DISCORD SERVER DROPDOWN MENU - ONLY SHOWS SERVER SETTINGS */}
+                {showServerDropdown && canManageServer && (
+                  <div className="absolute left-2 right-2 top-14 bg-[#111214] border border-[#232428] rounded-[6px] shadow-2xl p-1 z-50 animate-in fade-in zoom-in-95 duration-100">
                     <button
                       type="button"
                       onClick={() => {
                         setShowServerDropdown(false);
                         setIsServerSettingsOpen(true);
                       }}
-                      className="w-full flex items-center justify-between px-2.5 py-2 text-[13px] text-white hover:bg-[#ff6b00] rounded-[4px] transition-colors cursor-pointer text-left font-semibold group"
+                      className="w-full flex items-center justify-between px-2.5 py-2 text-[13px] text-white hover:bg-[#ff6b00] rounded-[4px] transition-colors cursor-pointer text-left font-medium group"
                     >
                       <div className="flex items-center gap-2">
                         <Settings className="w-4 h-4 text-[#ff6b00] group-hover:text-white" />
                         <span>Server Settings</span>
                       </div>
-                      <Crown className="w-3.5 h-3.5 text-[#f0b232] group-hover:text-white" />
                     </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowServerDropdown(false);
-                        setIsServerSettingsOpen(true);
-                      }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-[#dbdee1] hover:bg-[#232428] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left"
-                    >
-                      <Shield className="w-4 h-4 text-[#f0b232]" />
-                      <span>Roles & Permissions</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowServerDropdown(false);
-                        setIsServerSettingsOpen(true);
-                      }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-[#dbdee1] hover:bg-[#232428] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left"
-                    >
-                      <AlertTriangle className="w-4 h-4 text-[#ef4444]" />
-                      <span>Profanity Filter</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setShowServerDropdown(false);
-                        setIsServerSettingsOpen(true);
-                      }}
-                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-[#dbdee1] hover:bg-[#232428] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left"
-                    >
-                      <Users className="w-4 h-4 text-[#3b82f6]" />
-                      <span>Manage Members</span>
-                    </button>
-
-                    <div className="h-[1px] bg-[#232428] my-1" />
-
-                    <div className="px-2.5 py-1 text-[11px] text-[#80848e] flex items-center justify-between">
-                      <span>Owner:</span>
-                      <span className="text-[#f0b232] font-semibold truncate max-w-[120px]">{serverSettings.ownerEmail}</span>
-                    </div>
                   </div>
                 )}
               </div>
+
+              {/* SERVER BANNER (Image, GIF, or Gradient under Title and above Channels) */}
+              {serverSettings.banner && (
+                <div className="w-full h-32 relative overflow-hidden flex-shrink-0 border-b border-[#111214]">
+                  {serverSettings.bannerType === 'image' ||
+                  serverSettings.banner.startsWith('http') ||
+                  serverSettings.banner.startsWith('data:') ? (
+                    <img
+                      src={serverSettings.banner}
+                      alt={`${serverSettings.name} Banner`}
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div
+                      className="w-full h-full"
+                      style={{ background: serverSettings.banner }}
+                    />
+                  )}
+                  {/* Subtle dark gradient overlay at bottom of banner like Discord */}
+                  <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-[#18191c] to-transparent pointer-events-none" />
+                </div>
+              )}
 
               {/* CHANNELS LIST: categorized */}
               <div className="flex-1 overflow-y-auto px-2 py-3 space-y-4 select-none">
@@ -3760,12 +3759,12 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Player List on the right (Real users from Firestore) */}
+                {/* Player List on the right (Real users from Firestore grouped by Roles) */}
                 {showPlayerList && (() => {
                   const userMap = new Map<string, UserProfile>();
-                  allUsers.forEach((u) => userMap.set(u.username, u));
+                  allUsers.forEach((u) => userMap.set(u.username.toLowerCase(), u));
                   if (currentUsername) {
-                    userMap.set(currentUsername, {
+                    userMap.set(currentUsername.toLowerCase(), {
                       id: currentUsername,
                       username: currentUsername,
                       email: regEmail || loginEmail,
@@ -3782,175 +3781,190 @@ export default function App() {
                     });
                   }
                   const mergedList = Array.from(userMap.values());
+
+                  // Helper to resolve a member's effective roles and highest role
+                  const getMemberRoleInfo = (u: UserProfile) => {
+                    const isCurrent = u.username.toLowerCase() === currentUsername.toLowerCase();
+                    const uEmail = (isCurrent ? (regEmail || loginEmail) : u.email) || '';
+                    const isUserOwner =
+                      uEmail.trim().toLowerCase() === (serverSettings.ownerEmail || 'hayden@gmail.com').trim().toLowerCase() ||
+                      u.username.toLowerCase() === 'hayden';
+
+                    const assignedRoleIds = serverSettings.memberRoles?.[u.username.toLowerCase()] || [];
+                    const effectiveRoleIds = isUserOwner && !assignedRoleIds.includes('owner')
+                      ? ['owner', ...assignedRoleIds]
+                      : assignedRoleIds.length === 0 && serverSettings.defaultRoleId && serverSettings.roles[serverSettings.defaultRoleId]
+                      ? [serverSettings.defaultRoleId]
+                      : assignedRoleIds;
+
+                    const roles = effectiveRoleIds
+                      .map((id) => serverSettings.roles[id])
+                      .filter(Boolean)
+                      .sort((a, b) => (a.position || 99) - (b.position || 99));
+
+                    const highestRole = roles[0] || (serverSettings.defaultRoleId ? serverSettings.roles[serverSettings.defaultRoleId] : null);
+
+                    return {
+                      isUserOwner,
+                      roles,
+                      highestRole
+                    };
+                  };
+
+                  const memberRoleMap = new Map<string, { isUserOwner: boolean; roles: ServerRole[]; highestRole: ServerRole | null }>();
+                  mergedList.forEach((u) => {
+                    memberRoleMap.set(u.username.toLowerCase(), getMemberRoleInfo(u));
+                  });
+
+                  // Partition into online and offline
                   const onlineMembers = mergedList.filter((u) =>
-                    u.username === currentUsername ? userStatus !== 'offline' : u.status !== 'offline'
+                    u.username.toLowerCase() === currentUsername.toLowerCase()
+                      ? userStatus !== 'offline'
+                      : (u.status || 'offline') !== 'offline'
                   );
                   const offlineMembers = mergedList.filter((u) =>
-                    u.username === currentUsername ? userStatus === 'offline' : u.status === 'offline'
+                    u.username.toLowerCase() === currentUsername.toLowerCase()
+                      ? userStatus === 'offline'
+                      : (u.status || 'offline') === 'offline'
                   );
+
+                  // Hoisted roles sorted by position (e.g. Owner = 1, Admin = 2, etc.)
+                  const allRolesSorted = Object.values(serverSettings.roles).sort(
+                    (a, b) => (a.position || 99) - (b.position || 99)
+                  );
+                  const hoistedRoles = allRolesSorted.filter((r) => r.hoist !== false);
+
+                  // Bucket online members by highest hoisted role
+                  const roleGroups: { role: ServerRole; members: UserProfile[] }[] = [];
+                  const unhoistedOnlineMembers: UserProfile[] = [];
+
+                  hoistedRoles.forEach((role) => {
+                    const membersInRole = onlineMembers.filter((u) => {
+                      const info = memberRoleMap.get(u.username.toLowerCase());
+                      return info?.highestRole?.id === role.id;
+                    });
+                    if (membersInRole.length > 0) {
+                      roleGroups.push({ role, members: membersInRole });
+                    }
+                  });
+
+                  onlineMembers.forEach((u) => {
+                    const info = memberRoleMap.get(u.username.toLowerCase());
+                    if (!info?.highestRole || info.highestRole.hoist === false) {
+                      unhoistedOnlineMembers.push(u);
+                    }
+                  });
+
+                  // Render Member Row Helper
+                  const renderMemberRow = (u: UserProfile, isOffline = false) => {
+                    const isCurrent = u.username.toLowerCase() === currentUsername.toLowerCase();
+                    const uStatus = isCurrent ? userStatus : (u.status || 'offline');
+                    const uAvatar = isCurrent ? avatarPreview : u.avatar;
+                    const uDisplayName = isCurrent ? currentDisplayName : (u.displayName || u.username);
+                    const uAboutMe = isCurrent ? aboutMe : u.aboutMe;
+                    const info = memberRoleMap.get(u.username.toLowerCase());
+                    const nameColor = info?.highestRole?.color || (isOffline ? '#949ba4' : '#ffffff');
+
+                    return (
+                      <div
+                        key={u.username}
+                        onClick={() => {
+                          setSelectedServerMember(
+                            isCurrent
+                              ? {
+                                  ...u,
+                                  displayName: currentDisplayName,
+                                  avatar: avatarPreview,
+                                  banner: bannerPreview,
+                                  status: userStatus,
+                                  aboutMe,
+                                  pronouns
+                                }
+                              : u
+                          );
+                          setShowMemberMoreMenu(false);
+                          setMemberModalFeedback(null);
+                        }}
+                        className={`flex items-center gap-3 px-2 py-1.5 rounded-[4px] hover:bg-[#232428]/80 cursor-pointer group transition-colors ${
+                          isOffline ? 'opacity-60 hover:opacity-100' : ''
+                        }`}
+                      >
+                        <div className="relative flex-shrink-0">
+                          <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-2 ring-[#232428]">
+                            {uAvatar ? (
+                              <img src={uAvatar} alt="Avatar" className="w-full h-full object-cover" />
+                            ) : (
+                              <User className="w-4 h-4 text-[#ff6b00]" />
+                            )}
+                          </div>
+                          <div
+                            className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#18191c] ${
+                              isOffline ? 'bg-[#80848e]' : (STATUS_CONFIG[uStatus]?.bgClass || STATUS_CONFIG.online.bgClass)
+                            }`}
+                            title={isOffline ? 'Offline' : (STATUS_CONFIG[uStatus]?.label || 'Online')}
+                          />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className="font-semibold text-[14px] leading-tight truncate group-hover:brightness-110"
+                              style={{ color: nameColor }}
+                            >
+                              {uDisplayName}
+                            </span>
+                            {info?.isUserOwner && (
+                              <span title="Server Owner">
+                                <Crown className="w-3.5 h-3.5 text-[#f0b232] flex-shrink-0" />
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-[#949ba4] leading-tight truncate mt-0.5">
+                            {uAboutMe || (isOffline ? 'Offline' : (STATUS_CONFIG[uStatus]?.label || 'Online'))}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  };
 
                   return (
                     <aside className="w-60 bg-[#18191c] border-l border-[#111214]/60 flex flex-col flex-shrink-0 p-3 overflow-y-auto select-none">
-                      <div className="text-[12px] font-bold text-[#949ba4] uppercase tracking-wider px-2 mb-2">
-                        Online — {onlineMembers.length}
-                      </div>
+                      {/* Render each hoisted role section */}
+                      {roleGroups.map(({ role, members }) => (
+                        <div key={role.id} className="mb-4">
+                          <div
+                            className="text-[12px] font-bold uppercase tracking-wider px-2 mb-2 flex items-center justify-between"
+                            style={{ color: role.color }}
+                          >
+                            <span>{role.name} — {members.length}</span>
+                          </div>
+                          <div className="space-y-1">
+                            {members.map((u) => renderMemberRow(u, false))}
+                          </div>
+                        </div>
+                      ))}
 
-                      <div className="space-y-1 mb-4">
-                        {onlineMembers.map((u) => {
-                          const isCurrent = u.username === currentUsername;
-                          const uStatus = isCurrent ? userStatus : u.status;
-                          const uAvatar = isCurrent ? avatarPreview : u.avatar;
-                          const uDisplayName = isCurrent ? currentDisplayName : u.displayName || u.username;
-                          const uAboutMe = isCurrent ? aboutMe : u.aboutMe;
-                          const uEmail = (isCurrent ? (regEmail || loginEmail) : u.email) || '';
+                      {/* Render unhoisted online members */}
+                      {unhoistedOnlineMembers.length > 0 && (
+                        <div className="mb-4">
+                          <div className="text-[12px] font-bold text-[#949ba4] uppercase tracking-wider px-2 mb-2">
+                            Online — {unhoistedOnlineMembers.length}
+                          </div>
+                          <div className="space-y-1">
+                            {unhoistedOnlineMembers.map((u) => renderMemberRow(u, false))}
+                          </div>
+                        </div>
+                      )}
 
-                          const isUserOwner =
-                            uEmail.toLowerCase() === (serverSettings.ownerEmail || 'hayden@gmail.com').toLowerCase() ||
-                            u.username.toLowerCase() === 'hayden';
-                          const userRoleIds = serverSettings.memberRoles?.[u.username.toLowerCase()] || [];
-                          const effectiveRoleIds = isUserOwner && !userRoleIds.includes('owner') ? ['owner', ...userRoleIds] : userRoleIds;
-                          const highestRole = effectiveRoleIds
-                            .map((rId) => serverSettings.roles[rId])
-                            .filter(Boolean)
-                            .sort((a, b) => (a.position || 99) - (b.position || 99))[0];
-
-                          return (
-                            <div
-                              key={u.username}
-                              onClick={() => {
-                                setSelectedServerMember(
-                                  isCurrent
-                                    ? {
-                                        ...u,
-                                        displayName: currentDisplayName,
-                                        avatar: avatarPreview,
-                                        banner: bannerPreview,
-                                        status: userStatus,
-                                        aboutMe,
-                                        pronouns
-                                      }
-                                    : u
-                                );
-                                setShowMemberMoreMenu(false);
-                                setMemberModalFeedback(null);
-                              }}
-                              className="flex items-center gap-3 px-2 py-1.5 rounded-[4px] hover:bg-[#232428]/80 cursor-pointer group transition-colors"
-                            >
-                              <div className="relative flex-shrink-0">
-                                <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-2 ring-[#232428]">
-                                  {uAvatar ? (
-                                    <img src={uAvatar} alt="Avatar" className="w-full h-full object-cover" />
-                                  ) : (
-                                    <User className="w-4 h-4 text-[#ff6b00]" />
-                                  )}
-                                </div>
-                                <div
-                                  className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#18191c] ${
-                                    STATUS_CONFIG[uStatus]?.bgClass || STATUS_CONFIG.online.bgClass
-                                  }`}
-                                  title={STATUS_CONFIG[uStatus]?.label || 'Online'}
-                                />
-                              </div>
-                              <div className="min-w-0 flex-1">
-                                <div className="flex items-center gap-1.5">
-                                  <span
-                                    className="font-semibold text-[14px] leading-tight truncate group-hover:brightness-110"
-                                    style={{ color: highestRole ? highestRole.color : '#ffffff' }}
-                                  >
-                                    {uDisplayName}
-                                  </span>
-                                  {isUserOwner && (
-                                    <span title="Server Owner">
-                                      <Crown className="w-3.5 h-3.5 text-[#f0b232] flex-shrink-0" />
-                                    </span>
-                                  )}
-                                </div>
-                                <p className="text-[11px] text-[#949ba4] leading-tight truncate mt-0.5">
-                                  {uAboutMe || STATUS_CONFIG[uStatus]?.label || 'Online'}
-                                </p>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-
+                      {/* Render offline members */}
                       {offlineMembers.length > 0 && (
-                        <>
+                        <div>
                           <div className="text-[12px] font-bold text-[#949ba4] uppercase tracking-wider px-2 mb-2">
                             Offline — {offlineMembers.length}
                           </div>
                           <div className="space-y-1">
-                            {offlineMembers.map((u) => {
-                              const isCurrent = u.username === currentUsername;
-                              const uAvatar = isCurrent ? avatarPreview : u.avatar;
-                              const uDisplayName = isCurrent ? currentDisplayName : u.displayName || u.username;
-                              const uEmail = (isCurrent ? (regEmail || loginEmail) : u.email) || '';
-
-                              const isUserOwner =
-                                uEmail.toLowerCase() === (serverSettings.ownerEmail || 'hayden@gmail.com').toLowerCase() ||
-                                u.username.toLowerCase() === 'hayden';
-                              const userRoleIds = serverSettings.memberRoles?.[u.username.toLowerCase()] || [];
-                              const effectiveRoleIds = isUserOwner && !userRoleIds.includes('owner') ? ['owner', ...userRoleIds] : userRoleIds;
-                              const highestRole = effectiveRoleIds
-                                .map((rId) => serverSettings.roles[rId])
-                                .filter(Boolean)
-                                .sort((a, b) => (a.position || 99) - (b.position || 99))[0];
-
-                              return (
-                                <div
-                                  key={u.username}
-                                  onClick={() => {
-                                    setSelectedServerMember(
-                                      isCurrent
-                                        ? {
-                                            ...u,
-                                            displayName: currentDisplayName,
-                                            avatar: avatarPreview,
-                                            banner: bannerPreview,
-                                            status: userStatus,
-                                            aboutMe,
-                                            pronouns
-                                          }
-                                        : u
-                                    );
-                                    setShowMemberMoreMenu(false);
-                                    setMemberModalFeedback(null);
-                                  }}
-                                  className="flex items-center gap-3 px-2 py-1.5 rounded-[4px] hover:bg-[#232428]/80 cursor-pointer group transition-colors opacity-60 hover:opacity-100"
-                                >
-                                  <div className="relative flex-shrink-0">
-                                    <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-2 ring-[#232428]">
-                                      {uAvatar ? (
-                                        <img src={uAvatar} alt="Avatar" className="w-full h-full object-cover" />
-                                      ) : (
-                                        <User className="w-4 h-4 text-[#80848e]" />
-                                      )}
-                                    </div>
-                                    <div
-                                      className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#18191c] bg-[#80848e]"
-                                      title="Offline"
-                                    />
-                                  </div>
-                                  <div className="min-w-0 flex-1">
-                                    <div className="flex items-center gap-1.5">
-                                      <span
-                                        className="font-semibold text-[14px] leading-tight truncate group-hover:brightness-110"
-                                        style={{ color: highestRole ? highestRole.color : '#949ba4' }}
-                                      >
-                                        {uDisplayName}
-                                      </span>
-                                      {isUserOwner && (
-                                        <span title="Server Owner">
-                                          <Crown className="w-3.5 h-3.5 text-[#f0b232] flex-shrink-0" />
-                                        </span>
-                                      )}
-                                    </div>
-                                  </div>
-                                </div>
-                              );
-                            })}
+                            {offlineMembers.map((u) => renderMemberRow(u, true))}
                           </div>
-                        </>
+                        </div>
                       )}
                     </aside>
                   );
@@ -4266,7 +4280,7 @@ export default function App() {
 
         {/* FULLSCREEN SERVER SETTINGS MODAL */}
         <ServerSettingsModal
-          isOpen={isServerSettingsOpen}
+          isOpen={isServerSettingsOpen && canManageServer}
           onClose={() => setIsServerSettingsOpen(false)}
           settings={serverSettings}
           currentUserEmail={regEmail || loginEmail || ''}

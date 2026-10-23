@@ -1,4 +1,4 @@
-import { ref, onValue, set, get } from 'firebase/database';
+import { ref, onValue, set } from 'firebase/database';
 import { rtdb } from './firebase';
 import { cleanUndefined } from './database';
 
@@ -24,39 +24,29 @@ export interface ServerRole {
   };
 }
 
-export interface ProfanityFilterConfig {
-  enabled: boolean;
-  action: 'censor' | 'block';
-  customWords: string[];
-}
-
-export interface AuditLogEntry {
-  id: string;
-  action: string;
-  actor: string;
-  timestamp: number;
-}
-
 export interface ServerSettingsData {
   name: string;
   ownerEmail: string;
   ownerUsername?: string;
   description?: string;
   icon?: string | null;
+  banner?: string | null; // Image/GIF URL or CSS gradient
+  bannerType?: 'gradient' | 'image';
+  defaultRoleId?: string; // e.g. 'member'
   roles: Record<string, ServerRole>;
   memberRoles: Record<string, string[]>; // username lowercase -> array of role IDs
-  profanityFilter: ProfanityFilterConfig;
-  auditLog?: AuditLogEntry[];
 }
 
-export const DEFAULT_PROFANITY_WORDS: string[] = [
-  'fuck', 'fucking', 'fucked', 'fucker',
-  'shit', 'shitting', 'bullshit',
-  'bitch', 'bitches',
-  'asshole', 'ass', 'bastard',
-  'dick', 'cock', 'pussy',
-  'cunt', 'whore', 'slut',
-  'nigger', 'nigga', 'faggot', 'retard'
+export const PRESET_BANNER_GRADIENTS = [
+  { id: 'dark', label: 'Classic Dark', style: 'linear-gradient(to bottom, #18191c, #2b2d31)' },
+  { id: 'pink', label: 'Neon Pink', style: 'linear-gradient(135deg, #ec4899, #f43f5e)' },
+  { id: 'red', label: 'Crimson', style: 'linear-gradient(135deg, #ef4444, #b91c1c)' },
+  { id: 'orange', label: 'Yapzo Orange', style: 'linear-gradient(135deg, #ff6b00, #ea580c)' },
+  { id: 'yellow', label: 'Golden Glow', style: 'linear-gradient(135deg, #eab308, #ca8a04)' },
+  { id: 'purple', label: 'Amethyst', style: 'linear-gradient(135deg, #8b5cf6, #6d28d9)' },
+  { id: 'blue', label: 'Sky Blue', style: 'linear-gradient(135deg, #0ea5e9, #0284c7)' },
+  { id: 'cyan', label: 'Teal Mint', style: 'linear-gradient(135deg, #06b6d4, #0d9488)' },
+  { id: 'green', label: 'Emerald', style: 'linear-gradient(135deg, #22c55e, #15803d)' }
 ];
 
 export const DEFAULT_SERVER_SETTINGS: ServerSettingsData = {
@@ -65,6 +55,9 @@ export const DEFAULT_SERVER_SETTINGS: ServerSettingsData = {
   ownerUsername: '',
   description: 'The official home server for Yapzo community.',
   icon: null,
+  banner: null,
+  bannerType: 'gradient',
+  defaultRoleId: 'member',
   roles: {
     owner: {
       id: 'owner',
@@ -135,64 +128,10 @@ export const DEFAULT_SERVER_SETTINGS: ServerSettingsData = {
       }
     }
   },
-  memberRoles: {},
-  profanityFilter: {
-    enabled: true,
-    action: 'censor',
-    customWords: []
-  },
-  auditLog: [
-    {
-      id: 'init-1',
-      action: 'Server created with Owner role designated for hayden@gmail.com',
-      actor: 'System',
-      timestamp: Date.now()
-    }
-  ]
+  memberRoles: {}
 };
 
 const SETTINGS_REF_PATH = 'server_settings/yapzo_hq';
-
-/**
- * Filter text using profanity settings.
- */
-export function filterProfanity(
-  text: string,
-  config?: ProfanityFilterConfig
-): { hasProfanity: boolean; filteredText: string; detectedWords: string[] } {
-  if (!config || !config.enabled || !text) {
-    return { hasProfanity: false, filteredText: text, detectedWords: [] };
-  }
-
-  const allWords = Array.from(
-    new Set([...DEFAULT_PROFANITY_WORDS, ...(config.customWords || []).map((w) => w.trim().toLowerCase())])
-  ).filter(Boolean);
-
-  let detectedWords: string[] = [];
-  let filteredText = text;
-
-  for (const word of allWords) {
-    if (!word) continue;
-    const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const regex = new RegExp(`\\b${escaped}\\b`, 'gi');
-
-    if (regex.test(filteredText)) {
-      detectedWords.push(word);
-      if (config.action === 'censor') {
-        filteredText = filteredText.replace(regex, (match) => {
-          if (match.length <= 2) return '*'.repeat(match.length);
-          return match[0] + '*'.repeat(match.length - 2) + match[match.length - 1];
-        });
-      }
-    }
-  }
-
-  return {
-    hasProfanity: detectedWords.length > 0,
-    filteredText,
-    detectedWords
-  };
-}
 
 /**
  * Subscribe to server settings in Firebase RTDB.
@@ -222,10 +161,7 @@ export function subscribeToServerSettings(
         ...DEFAULT_SERVER_SETTINGS,
         ...data,
         roles: mergedRoles,
-        profanityFilter: {
-          ...DEFAULT_SERVER_SETTINGS.profanityFilter,
-          ...(data.profanityFilter || {})
-        },
+        defaultRoleId: data.defaultRoleId || 'member',
         memberRoles: data.memberRoles || {}
       };
       callback(mergedSettings);
@@ -275,6 +211,8 @@ export function checkUserPermissions(
   // Owner always gets 'owner' role
   const effectiveRoleIds = isOwner && !userRoleIds.includes('owner')
     ? ['owner', ...userRoleIds]
+    : userRoleIds.length === 0 && settings.defaultRoleId && settings.roles[settings.defaultRoleId]
+    ? [settings.defaultRoleId]
     : userRoleIds;
 
   const userRoles = effectiveRoleIds
