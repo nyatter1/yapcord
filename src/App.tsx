@@ -25,13 +25,20 @@ import {
   Smile,
   Hash,
   Users,
-  Loader2
+  Loader2,
+  Reply,
+  Image as ImageIcon,
+  ExternalLink,
+  MessageSquare,
+  UserPlus,
+  UserCheck
 } from 'lucide-react';
 import { uploadToCloudinary } from './lib/cloudinary';
 import {
   UserProfile,
   ChatMessage,
   UserStatus,
+  FriendItem,
   checkHandleOrEmailExists,
   findUserByHandleOrEmail,
   saveUserProfile,
@@ -42,8 +49,18 @@ import {
   subscribeToSelfMessages,
   sendSelfMessage,
   deleteSelfMessage,
-  deleteChannelMessage
+  deleteChannelMessage,
+  getDmChatId,
+  subscribeToDmMessages,
+  sendDmMessage,
+  deleteDmMessage,
+  toggleMessageReaction,
+  addFriend,
+  removeFriend,
+  subscribeToFriends
 } from './lib/database';
+import { ChatMessageItem } from './components/ChatMessageItem';
+import { FriendsView } from './components/FriendsView';
 
 type Screen = 'auth' | 'step1' | 'step2' | 'loading' | 'app';
 type AuthMode = 'login' | 'register';
@@ -390,15 +407,40 @@ export default function App() {
 
   // DMs / Friends header tab and sort filter state
   const [dmTab, setDmTab] = useState<'dms' | 'friends'>(initialSession?.dmTab || 'dms');
+  const [friendsFilterTab, setFriendsFilterTab] = useState<'online' | 'all' | 'add'>('online');
+  const [friends, setFriends] = useState<FriendItem[]>([]);
+  const [addFriendInput, setAddFriendInput] = useState('');
+  const [addFriendStatus, setAddFriendStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [isAddingFriend, setIsAddingFriend] = useState(false);
+  const [friendsSearchQuery, setFriendsSearchQuery] = useState('');
+
   const [sortOrder, setSortOrder] = useState<'newest' | 'oldest'>(initialSession?.sortOrder || 'newest');
   const [showSortDropdown, setShowSortDropdown] = useState(false);
   const sortMenuRef = useRef<HTMLDivElement>(null);
 
-  // DM of yourself state & chat messages
-  const [selectedDm, setSelectedDm] = useState<'self' | null>('self');
+  // DM state & chat messages (either 'self' or friend's username)
+  const [selectedDm, setSelectedDm] = useState<'self' | string>('self');
   const [selfMessages, setSelfMessages] = useState<ChatMessage[]>(initialSession?.selfMessages || []);
+  const [dmChatMessages, setDmChatMessages] = useState<ChatMessage[]>([]);
   const [chatInput, setChatInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const dmChatMessagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Replying state (inline Discord quote)
+  const [replyTarget, setReplyTarget] = useState<{
+    message: ChatMessage;
+    location: 'channel' | 'dm' | 'self';
+  } | null>(null);
+
+  // Image Attachment state & file input refs (no mp4 supported)
+  const [channelAttachment, setChannelAttachment] = useState<{ file: File; previewUrl: string; name: string } | null>(null);
+  const [dmAttachment, setDmAttachment] = useState<{ file: File; previewUrl: string; name: string } | null>(null);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const channelFileInputRef = useRef<HTMLInputElement>(null);
+  const dmFileInputRef = useRef<HTMLInputElement>(null);
+
+  // Fullscreen Image & GIF Lightbox viewer modal
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
 
   // Profile sidebar overlapping DM
   const [showProfilePanel, setShowProfilePanel] = useState(true);
@@ -407,6 +449,13 @@ export default function App() {
   const [isMuted, setIsMuted] = useState(initialSession?.isMuted ?? false);
   const [isDeafened, setIsDeafened] = useState(initialSession?.isDeafened ?? false);
   const [userStatus, setUserStatus] = useState<UserStatus>(initialSession?.status || 'online');
+
+  const currentDisplayName =
+    regDisplayName.trim() || regUsername.trim() || (loginEmail ? loginEmail.split('@')[0] : 'juxtopposed');
+  const currentUsername =
+    regUsername.trim() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : 'juxtopposed');
+
+  const selectedFriend = friends.find((f) => f.username.toLowerCase() === selectedDm.toLowerCase()) || null;
 
   // Loading screen tip index
   const [currentTipIndex, setCurrentTipIndex] = useState(0);
@@ -553,11 +602,15 @@ export default function App() {
       draftAvatar !== avatarPreview ||
       draftBanner !== bannerPreview);
 
-  // Close fullscreen settings or crop modal on Escape key
+  // Close fullscreen settings, image preview lightbox, reply or crop modal on Escape key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (cropModal) {
+        if (previewImageUrl) {
+          setPreviewImageUrl(null);
+        } else if (replyTarget) {
+          setReplyTarget(null);
+        } else if (cropModal) {
           setCropModal(null);
         } else if (isSettingsOpen) {
           setDraftDisplayName(regDisplayName);
@@ -571,7 +624,7 @@ export default function App() {
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isSettingsOpen, cropModal, regDisplayName, pronouns, aboutMe, avatarPreview, bannerPreview]);
+  }, [previewImageUrl, replyTarget, isSettingsOpen, cropModal, regDisplayName, pronouns, aboutMe, avatarPreview, bannerPreview]);
 
   // Scroll to bottom when self messages change
   useEffect(() => {
@@ -623,6 +676,34 @@ export default function App() {
 
     return () => unsubscribe();
   }, [screen]);
+
+  // Real-time listener for friends
+  useEffect(() => {
+    if (screen !== 'app' || !currentUsername) return;
+    const unsubscribe = subscribeToFriends(currentUsername, (f) => {
+      setFriends(f);
+    });
+    return () => unsubscribe();
+  }, [screen, currentUsername]);
+
+  // Real-time listener for 1-on-1 DM with selected friend
+  useEffect(() => {
+    if (screen !== 'app' || !currentUsername || selectedDm === 'self' || !selectedDm) {
+      setDmChatMessages([]);
+      return;
+    }
+    const unsubscribe = subscribeToDmMessages(currentUsername, selectedDm, (msgs) => {
+      setDmChatMessages(msgs);
+    });
+    return () => unsubscribe();
+  }, [screen, currentUsername, selectedDm]);
+
+  // Scroll to bottom when 1-on-1 DM messages change
+  useEffect(() => {
+    if (selectedDm !== 'self' && isHomeSelected) {
+      dmChatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [dmChatMessages, selectedDm, isHomeSelected]);
 
   // Save session state to localStorage whenever relevant fields change
   useEffect(() => {
@@ -1057,91 +1138,225 @@ export default function App() {
     setMode('login');
   };
 
-  // Send message to yourself (persisted to Firestore)
-  const handleSendMessage = async (e: React.FormEvent) => {
+  // Handle selecting an image or GIF file (specifically disallows MP4)
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, target: 'channel' | 'dm') => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.type.includes('video') || file.name.toLowerCase().endsWith('.mp4')) {
+      alert('Video (.mp4) is not supported yet. Please select an image or GIF.');
+      e.target.value = '';
+      return;
+    }
+
+    if (!file.type.startsWith('image/')) {
+      alert('Please select an image or GIF file.');
+      e.target.value = '';
+      return;
+    }
+
+    const previewUrl = URL.createObjectURL(file);
+    if (target === 'channel') {
+      setChannelAttachment({ file, previewUrl, name: file.name });
+    } else {
+      setDmAttachment({ file, previewUrl, name: file.name });
+    }
+    e.target.value = '';
+  };
+
+  // Send message in Direct Messages (either Self-notes or Friend 1-on-1)
+  const handleSendDmMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = chatInput.trim();
-    if (!text) return;
+    if (!text && !dmAttachment) return;
+
+    let uploadedImageUrl: string | undefined = undefined;
+
+    if (dmAttachment) {
+      try {
+        setIsUploadingAttachment(true);
+        uploadedImageUrl = await uploadToCloudinary(dmAttachment.file);
+      } catch (err) {
+        console.error('Error uploading DM image:', err);
+      } finally {
+        setIsUploadingAttachment(false);
+      }
+    }
 
     const currentMsg: Omit<ChatMessage, 'id'> = {
       text,
+      imageUrl: uploadedImageUrl,
       authorId: currentUsername,
       authorUsername: currentUsername,
       authorDisplayName: currentDisplayName,
       authorAvatar: avatarPreview,
       timestamp: formatDiscordTimestamp(),
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      replyTo: replyTarget && (replyTarget.location === 'dm' || replyTarget.location === 'self') ? {
+        id: replyTarget.message.id,
+        text: replyTarget.message.text,
+        imageUrl: replyTarget.message.imageUrl,
+        authorDisplayName: replyTarget.message.authorDisplayName,
+        authorUsername: replyTarget.message.authorUsername
+      } : null
     };
 
     setChatInput('');
+    setDmAttachment(null);
+    setReplyTarget(null);
 
     try {
-      await sendSelfMessage(currentUsername, currentMsg);
+      if (selectedDm === 'self') {
+        await sendSelfMessage(currentUsername, currentMsg);
+      } else {
+        await sendDmMessage(currentUsername, selectedDm, currentMsg);
+      }
     } catch (err) {
-      console.error('Error sending self note to Firestore:', err);
-      setSelfMessages((prev) => [
-        ...prev,
-        { id: `${Date.now()}`, ...currentMsg }
-      ]);
+      console.error('Error sending DM message:', err);
     }
   };
 
-  // Send message in server channel (persisted to Firestore in real time)
+  // Send message in server channel
   const handleSendChannelMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = channelChatInput.trim();
-    if (!text) return;
+    if (!text && !channelAttachment) return;
+
+    let uploadedImageUrl: string | undefined = undefined;
+
+    if (channelAttachment) {
+      try {
+        setIsUploadingAttachment(true);
+        uploadedImageUrl = await uploadToCloudinary(channelAttachment.file);
+      } catch (err) {
+        console.error('Error uploading channel image:', err);
+      } finally {
+        setIsUploadingAttachment(false);
+      }
+    }
 
     const currentMsg: Omit<ChatMessage, 'id'> = {
       channelId: activeChannelId,
       text,
+      imageUrl: uploadedImageUrl,
       authorId: currentUsername,
       authorUsername: currentUsername,
       authorDisplayName: currentDisplayName,
       authorAvatar: avatarPreview,
       timestamp: formatDiscordTimestamp(),
-      createdAt: Date.now()
+      createdAt: Date.now(),
+      replyTo: replyTarget && replyTarget.location === 'channel' ? {
+        id: replyTarget.message.id,
+        text: replyTarget.message.text,
+        imageUrl: replyTarget.message.imageUrl,
+        authorDisplayName: replyTarget.message.authorDisplayName,
+        authorUsername: replyTarget.message.authorUsername
+      } : null
     };
 
     setChannelChatInput('');
+    setChannelAttachment(null);
+    setReplyTarget(null);
 
     try {
       await sendChannelMessage(activeChannelId, currentMsg);
     } catch (err) {
-      console.error('Error sending channel message to Firestore:', err);
-      setChannelMessages((prev) => ({
-        ...prev,
-        [activeChannelId]: [
-          ...(prev[activeChannelId] || []),
-          { id: `${Date.now()}`, ...currentMsg }
-        ]
-      }));
+      console.error('Error sending channel message:', err);
     }
   };
 
-  // Delete message handlers
-  const handleDeleteChannelMessage = async (channelId: string, messageId: string) => {
+  // Delete message handlers (only allows deleting your own messages)
+  const handleDeleteMessage = async (msg: ChatMessage, location: 'channel' | 'dm' | 'self') => {
+    if (msg.authorUsername.toLowerCase() !== currentUsername.toLowerCase()) return;
     try {
-      await deleteChannelMessage(channelId, messageId);
+      if (location === 'channel') {
+        await deleteChannelMessage(activeChannelId, msg.id);
+      } else if (location === 'self') {
+        await deleteSelfMessage(currentUsername, msg.id);
+      } else {
+        await deleteDmMessage(getDmChatId(currentUsername, selectedDm), msg.id);
+      }
     } catch (err) {
-      console.error('Error deleting channel message:', err);
+      console.error('Error deleting message:', err);
     }
   };
 
-  const handleDeleteSelfMessage = async (messageId: string) => {
+  // Toggle reaction on a message
+  const handleToggleReaction = async (msg: ChatMessage, emoji: string, location: 'channel' | 'dm' | 'self') => {
     try {
-      await deleteSelfMessage(currentUsername, messageId);
+      const contextKey =
+        location === 'channel'
+          ? activeChannelId
+          : location === 'self'
+          ? currentUsername
+          : getDmChatId(currentUsername, selectedDm);
+      await toggleMessageReaction(location, contextKey, msg.id, emoji, currentUsername);
     } catch (err) {
-      console.error('Error deleting self message:', err);
+      console.error('Error toggling reaction:', err);
+    }
+  };
+
+  // Add friend handler
+  const handleAddFriendSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addFriendInput.trim()) return;
+
+    setIsAddingFriend(true);
+    setAddFriendStatus(null);
+
+    try {
+      const myProfile: UserProfile = {
+        id: currentUsername,
+        username: currentUsername,
+        email: regEmail || loginEmail || 'user@yapzo.gg',
+        displayName: currentDisplayName,
+        avatar: avatarPreview,
+        banner: bannerPreview,
+        pronouns,
+        aboutMe,
+        status: userStatus,
+        isMuted,
+        isDeafened,
+        createdAt: Date.now(),
+        lastSeen: Date.now()
+      };
+
+      const res = await addFriend(myProfile, addFriendInput.trim());
+      if (res.success && res.friend) {
+        setAddFriendStatus({
+          type: 'success',
+          message: `Success! Added @${res.friend.displayName || res.friend.username} as your friend.`
+        });
+        setAddFriendInput('');
+      } else {
+        setAddFriendStatus({
+          type: 'error',
+          message: res.error || 'Failed to add friend.'
+        });
+      }
+    } catch (err) {
+      setAddFriendStatus({
+        type: 'error',
+        message: 'Something went wrong while adding friend. Please check the username.'
+      });
+    } finally {
+      setIsAddingFriend(false);
+    }
+  };
+
+  // Remove friend handler
+  const handleRemoveFriendAction = async (friendUsername: string) => {
+    try {
+      await removeFriend(currentUsername, friendUsername);
+      if (selectedDm.toLowerCase() === friendUsername.toLowerCase()) {
+        setSelectedDm('self');
+      }
+    } catch (err) {
+      console.error('Error removing friend:', err);
     }
   };
 
   const allAgreed = agreeTerms && agreeGuidelines && agreeRules;
-
-  const currentDisplayName =
-    regDisplayName.trim() || regUsername.trim() || (loginEmail ? loginEmail.split('@')[0] : 'juxtopposed');
-  const currentUsername =
-    regUsername.trim() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : 'juxtopposed');
 
   // Sorted messages based on user filter preference
   const displayedMessages = [...selfMessages].sort((a, b) => {
@@ -1405,12 +1620,12 @@ export default function App() {
                 </div>
               </div>
 
-              {/* DM CONVERSATIONS LIST (FEATURES DM OF YOURSELF) */}
+              {/* DM CONVERSATIONS LIST (FEATURES DM OF YOURSELF + ALL ADDED FRIENDS) */}
               <div className="flex-1 overflow-y-auto px-2 py-3 space-y-1">
                 {dmTab === 'dms' ? (
                   <>
-                    <div className="px-2 pb-1.5 text-[11px] font-bold text-[#949ba4] uppercase tracking-wider">
-                      Direct Messages
+                    <div className="px-2 pb-1.5 text-[11px] font-bold text-[#949ba4] uppercase tracking-wider flex items-center justify-between">
+                      <span>Direct Messages</span>
                     </div>
 
                     {/* DM OF YOURSELF */}
@@ -1422,9 +1637,8 @@ export default function App() {
                           : 'hover:bg-[#232428] text-[#949ba4] hover:text-[#dbdee1]'
                       }`}
                     >
-                      {/* Avatar with status indicator */}
                       <div className="relative flex-shrink-0">
-                        <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white">
+                        <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-1 ring-[#232428]">
                           {avatarPreview ? (
                             <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
                           ) : (
@@ -1438,24 +1652,110 @@ export default function App() {
                         />
                       </div>
 
-                      {/* Profile Name */}
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-1.5">
                           <span className="text-[14px] font-medium truncate text-white">
                             {currentDisplayName}
                           </span>
+                          <span className="text-[11px] text-[#80848e] bg-[#232428] px-1 rounded-[3px]">You</span>
                         </div>
                         <p className="text-[12px] text-[#949ba4] truncate mt-0.5">
                           {selfMessages.length > 0
-                            ? selfMessages[selfMessages.length - 1].text
+                            ? selfMessages[selfMessages.length - 1].text || '[Image]'
                             : 'Message yourself'}
                         </p>
                       </div>
                     </div>
+
+                    {/* ADDED FRIENDS DMs */}
+                    {friends.map((friend) => {
+                      const isSelected = selectedDm.toLowerCase() === friend.username.toLowerCase();
+                      const statusInfo = STATUS_CONFIG[friend.status || 'offline'] || STATUS_CONFIG.offline;
+                      return (
+                        <div
+                          key={friend.id}
+                          onClick={() => setSelectedDm(friend.username)}
+                          className={`flex items-center gap-3 px-2 py-2 rounded-[5px] cursor-pointer transition-colors group select-none ${
+                            isSelected
+                              ? 'bg-[#2b2d31] text-white shadow-xs'
+                              : 'hover:bg-[#232428] text-[#949ba4] hover:text-[#dbdee1]'
+                          }`}
+                        >
+                          <div className="relative flex-shrink-0">
+                            <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-1 ring-[#232428]">
+                              {friend.avatar ? (
+                                <img src={friend.avatar} alt="Avatar" className="w-full h-full object-cover" />
+                              ) : (
+                                <User className="w-4 h-4 text-[#ff6b00]" />
+                              )}
+                            </div>
+                            <div
+                              className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#18191c] ${statusInfo.bgClass}`}
+                              title={statusInfo.label}
+                            />
+                          </div>
+
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[14px] font-medium truncate text-white">
+                                {friend.displayName || friend.username}
+                              </span>
+                            </div>
+                            <p className="text-[12px] text-[#949ba4] truncate mt-0.5">
+                              @{friend.username}
+                            </p>
+                          </div>
+                        </div>
+                      );
+                    })}
+
+                    {friends.length === 0 && (
+                      <div className="px-2 pt-3 text-[12px] text-[#80848e] leading-relaxed">
+                        Add friends in the <span className="text-[#ff8f3d] font-medium cursor-pointer hover:underline" onClick={() => setDmTab('friends')}>Friends tab</span> to message them directly.
+                      </div>
+                    )}
                   </>
                 ) : (
-                  <div className="py-8 text-center text-[#949ba4] text-[13px] px-3">
-                    No friends added yet.
+                  /* FRIENDS TAB SIDEBAR */
+                  <div className="space-y-1">
+                    <button
+                      type="button"
+                      onClick={() => setFriendsFilterTab('online')}
+                      className={`w-full flex items-center gap-3 px-2.5 py-2 rounded-[5px] cursor-pointer transition-colors text-left text-[14px] font-medium ${
+                        friendsFilterTab === 'online'
+                          ? 'bg-[#2b2d31] text-white'
+                          : 'text-[#949ba4] hover:bg-[#232428] hover:text-[#dbdee1]'
+                      }`}
+                    >
+                      <Users className="w-4 h-4 text-[#23a55a]" />
+                      <span>Online Friends ({friends.filter(f => f.status && f.status !== 'offline').length})</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setFriendsFilterTab('all')}
+                      className={`w-full flex items-center gap-3 px-2.5 py-2 rounded-[5px] cursor-pointer transition-colors text-left text-[14px] font-medium ${
+                        friendsFilterTab === 'all'
+                          ? 'bg-[#2b2d31] text-white'
+                          : 'text-[#949ba4] hover:bg-[#232428] hover:text-[#dbdee1]'
+                      }`}
+                    >
+                      <Users className="w-4 h-4 text-[#80848e]" />
+                      <span>All Friends ({friends.length})</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setFriendsFilterTab('add')}
+                      className={`w-full flex items-center gap-3 px-2.5 py-2 rounded-[5px] cursor-pointer transition-colors text-left text-[14px] font-medium ${
+                        friendsFilterTab === 'add'
+                          ? 'bg-[#ff6b00]/20 text-[#ff8f3d]'
+                          : 'text-[#949ba4] hover:bg-[#232428] hover:text-[#dbdee1]'
+                      }`}
+                    >
+                      <UserPlus className="w-4 h-4 text-[#ff6b00]" />
+                      <span>Add Friend</span>
+                    </button>
                   </div>
                 )}
               </div>
@@ -1668,7 +1968,24 @@ export default function App() {
         {/* MAIN BODY AREA: EITHER HOME (DM) OR YAPZO HQ SERVER CHANNELS */}
         <main className="flex-1 bg-[#111214] flex flex-col min-w-0 relative">
           {isHomeSelected ? (
-            selectedDm === 'self' ? (
+            dmTab === 'friends' ? (
+              <FriendsView
+                friends={friends}
+                filterTab={friendsFilterTab}
+                onFilterTabChange={setFriendsFilterTab}
+                addFriendInput={addFriendInput}
+                onAddFriendInputChange={setAddFriendInput}
+                onAddFriendSubmit={handleAddFriendSubmit}
+                addFriendStatus={addFriendStatus}
+                isAddingFriend={isAddingFriend}
+                onOpenDm={(friendUser) => {
+                  setDmTab('dms');
+                  setSelectedDm(friendUser);
+                }}
+                onRemoveFriend={handleRemoveFriendAction}
+                statusConfig={STATUS_CONFIG}
+              />
+            ) : selectedDm === 'self' ? (
               <div className="flex flex-col h-full w-full">
                 {/* Chat Header Bar */}
                 <div className="h-12 border-b border-[#18191c] bg-[#18191c] px-4 flex items-center justify-between flex-shrink-0 shadow-xs z-10">
@@ -1699,7 +2016,6 @@ export default function App() {
 
                 {/* Chat & Profile Main Area below header */}
                 <div className="flex-1 flex min-h-0 relative overflow-hidden">
-                  {/* Chat Column (Messages + Input) - adjusts margin so content fits cleanly next to the floating profile */}
                   <div
                     className={`flex-1 flex flex-col min-h-0 min-w-0 transition-[margin] duration-200 ease-out ${
                       showProfilePanel ? 'mr-[326px]' : 'mr-0'
@@ -1726,56 +2042,83 @@ export default function App() {
                         <div className="h-[1px] bg-[#232428] mt-6" />
                       </div>
 
-                      {/* Rendered messages */}
+                      {/* Rendered self messages */}
                       {displayedMessages.map((msg) => (
-                        <div
+                        <ChatMessageItem
                           key={msg.id}
-                          className="flex gap-4 py-1 px-3 -mx-3 hover:bg-[#18191c]/60 rounded-[4px] group transition-colors"
-                        >
-                          <div className="w-10 h-10 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white flex-shrink-0 mt-0.5">
-                            {avatarPreview ? (
-                              <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
-                            ) : (
-                              <User className="w-5 h-5 text-[#ff6b00]" />
-                            )}
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-baseline gap-2">
-                              <span className="font-semibold text-white text-[15px] hover:underline cursor-pointer">
-                                {currentDisplayName}
-                              </span>
-                              <span className="text-[11px] text-[#949ba4]">
-                                {msg.timestamp}
-                              </span>
-                            </div>
-                            <p className="text-[15px] text-[#dbdee1] leading-relaxed break-words whitespace-pre-wrap select-text mt-0.5">
-                              {msg.text}
-                            </p>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteSelfMessage(msg.id)}
-                            className="opacity-0 group-hover:opacity-100 text-[#949ba4] hover:text-[#f23f43] p-1 transition-all cursor-pointer self-start"
-                            title="Delete note"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </div>
+                          msg={msg}
+                          currentUsername={currentUsername}
+                          location="self"
+                          onReply={(m) => setReplyTarget({ message: m, location: 'self' })}
+                          onDelete={(m) => handleDeleteMessage(m, 'self')}
+                          onToggleReaction={(m, emoji) => handleToggleReaction(m, emoji, 'self')}
+                          onImageClick={(url) => setPreviewImageUrl(url)}
+                        />
                       ))}
                       <div ref={messagesEndRef} />
                     </div>
 
                     {/* Chat Input Bar */}
                     <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0">
+                      {/* Replying banner */}
+                      {replyTarget && (replyTarget.location === 'self' || replyTarget.location === 'dm') && (
+                        <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] px-3.5 py-1.5 flex items-center justify-between text-[12px] text-[#949ba4]">
+                          <div className="flex items-center gap-2 truncate">
+                            <Reply className="w-3.5 h-3.5 text-[#ff6b00] flex-shrink-0" />
+                            <span>Replying to</span>
+                            <span className="font-semibold text-white">
+                              @{replyTarget.message.authorDisplayName || replyTarget.message.authorUsername}
+                            </span>
+                            {replyTarget.message.text && (
+                              <span className="truncate max-w-xs text-[#80848e]">
+                                "{replyTarget.message.text}"
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setReplyTarget(null)}
+                            className="p-1 text-[#949ba4] hover:text-white rounded-[3px] cursor-pointer"
+                            title="Cancel reply"
+                          >
+                            <X className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      )}
+
+                      {/* Attachment Preview Banner */}
+                      {dmAttachment && (
+                        <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] p-2.5 flex items-center gap-3">
+                          <div className="w-12 h-12 rounded-[4px] overflow-hidden bg-black/40 border border-[#2b2d31] flex items-center justify-center flex-shrink-0">
+                            <img src={dmAttachment.previewUrl} alt="Preview" className="w-full h-full object-cover" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-[13px] font-medium text-white truncate">{dmAttachment.name}</div>
+                            <div className="text-[11px] text-[#ff6b00]">Image / GIF ready to upload</div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setDmAttachment(null)}
+                            className="p-1 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white cursor-pointer mr-2"
+                            title="Remove attachment"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      )}
+
                       <form
-                        onSubmit={handleSendMessage}
-                        className="rounded-[8px] bg-[#1e1f22] border border-transparent focus-within:border-[#ff6b00]/40 flex items-center px-4 py-2.5 transition-colors"
+                        onSubmit={handleSendDmMessage}
+                        className={`bg-[#1e1f22] border border-transparent focus-within:border-[#ff6b00]/40 flex items-center px-4 py-2.5 transition-colors ${
+                          replyTarget || dmAttachment ? 'rounded-b-[8px]' : 'rounded-[8px]'
+                        }`}
                       >
-                        {/* Plus button (no upload yet as requested) */}
+                        {/* Plus button for file upload */}
                         <button
                           type="button"
+                          onClick={() => dmFileInputRef.current?.click()}
                           className="w-6 h-6 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white flex items-center justify-center transition-colors cursor-pointer flex-shrink-0 mr-3"
-                          title="Upload file (coming soon)"
+                          title="Upload Image or GIF (no MP4)"
                         >
                           <Plus className="w-4 h-4 stroke-[2.5]" />
                         </button>
@@ -1793,18 +2136,24 @@ export default function App() {
                         <div className="flex items-center gap-2 text-[#949ba4]">
                           <button
                             type="button"
+                            onClick={() => setChatInput((prev) => prev + ' 😊')}
                             className="hover:text-white transition-colors cursor-pointer p-1"
                             title="Insert Emoji"
                           >
                             <Smile className="w-5 h-5" />
                           </button>
-                          {chatInput.trim() && (
+                          {(chatInput.trim() || dmAttachment) && (
                             <button
                               type="submit"
-                              className="p-1 text-[#ff6b00] hover:text-[#e55b00] transition-colors cursor-pointer"
+                              disabled={isUploadingAttachment}
+                              className="p-1 text-[#ff6b00] hover:text-[#e55b00] disabled:opacity-50 transition-colors cursor-pointer"
                               title="Send Message"
                             >
-                              <Send className="w-4 h-4" />
+                              {isUploadingAttachment ? (
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                              ) : (
+                                <Send className="w-4 h-4" />
+                              )}
                             </button>
                           )}
                         </div>
@@ -1812,23 +2161,16 @@ export default function App() {
                     </div>
                   </div>
 
-                  {/* OVERLAPPING USER PROFILE ON THE RIGHT (NOT PINNED, FLOATING) */}
+                  {/* OVERLAPPING USER PROFILE ON THE RIGHT */}
                   {showProfilePanel && (
                     <div className="absolute right-4 top-2 bottom-4 w-[310px] max-w-[calc(100vw-360px)] bg-[#18191c] border border-[#232428] rounded-[8px] shadow-2xl flex flex-col overflow-hidden z-20 animate-in fade-in duration-150 select-none">
-                      {/* Banner and Avatar Header container - avatar strictly in front of banner */}
                       <div className="relative flex-shrink-0">
-                        {/* Banner */}
                         <div className="h-28 bg-[#1f2023] overflow-hidden relative">
                           {bannerPreview ? (
-                            <img
-                              src={bannerPreview}
-                              alt="Profile Banner"
-                              className="w-full h-full object-cover"
-                            />
+                            <img src={bannerPreview} alt="Profile Banner" className="w-full h-full object-cover" />
                           ) : (
                             <div className="w-full h-full bg-[#232428]" />
                           )}
-                          {/* Small close X button on floating card */}
                           <button
                             type="button"
                             onClick={() => setShowProfilePanel(false)}
@@ -1839,16 +2181,11 @@ export default function App() {
                           </button>
                         </div>
 
-                        {/* Avatar overlapping banner: positioned with z-20 so it is strictly IN FRONT of the banner */}
                         <div className="absolute left-4 -bottom-10 z-20">
                           <div className="relative">
                             <div className="w-20 h-20 rounded-full bg-[#111214] ring-4 ring-[#18191c] overflow-hidden flex items-center justify-center text-white shadow-md">
                               {avatarPreview ? (
-                                <img
-                                  src={avatarPreview}
-                                  alt="Avatar"
-                                  className="w-full h-full object-cover"
-                                />
+                                <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
                               ) : (
                                 <User className="w-10 h-10 text-[#dbdee1]" />
                               )}
@@ -1863,9 +2200,7 @@ export default function App() {
                         </div>
                       </div>
 
-                      {/* Body Content below avatar */}
                       <div className="pt-12 px-4 pb-4 relative flex-1 overflow-y-auto">
-                        {/* username (the like dot thingy) (pronouns) */}
                         <div className="mb-3">
                           <h3 className="text-white font-bold text-[18px] leading-tight truncate">
                             {currentDisplayName}
@@ -1881,10 +2216,8 @@ export default function App() {
                           </div>
                         </div>
 
-                        {/* Divider: ------------------------ */}
                         <div className="h-[1px] bg-[#232428] my-3.5" />
 
-                        {/* about me (pure text no background) */}
                         <div className="mb-4">
                           <div className="text-[12px] font-bold text-[#b5bac1] uppercase tracking-wider mb-1.5">
                             About Me
@@ -1894,7 +2227,6 @@ export default function App() {
                           </p>
                         </div>
 
-                        {/* member since: */}
                         <div className="mb-4">
                           <div className="text-[12px] font-bold text-[#b5bac1] uppercase tracking-wider mb-1">
                             Member Since
@@ -1903,16 +2235,176 @@ export default function App() {
                             Oct 24, 2026
                           </p>
                         </div>
-
-                        {/* Strictly NO view profile or view full profile buttons */}
                       </div>
                     </div>
                   )}
                 </div>
               </div>
             ) : (
-              <div className="flex-1 flex items-center justify-center text-[#949ba4] text-[14px]">
-                Select a conversation to start chatting
+              /* FRIEND 1-ON-1 DIRECT MESSAGE CHAT */
+              <div className="flex flex-col h-full w-full">
+                {/* Chat Header Bar */}
+                <div className="h-12 border-b border-[#18191c] bg-[#18191c] px-4 flex items-center justify-between flex-shrink-0 shadow-xs z-10">
+                  <div className="flex items-center gap-3">
+                    <span className="text-[#949ba4] font-bold text-[18px]">@</span>
+                    <span className="font-bold text-white text-[15px]">
+                      {selectedFriend?.displayName || selectedDm}
+                    </span>
+                    {selectedFriend && (
+                      <>
+                        <div
+                          className={`w-2.5 h-2.5 rounded-full ${
+                            (STATUS_CONFIG[selectedFriend.status || 'offline'] || STATUS_CONFIG.offline).bgClass
+                          }`}
+                          title={(STATUS_CONFIG[selectedFriend.status || 'offline'] || STATUS_CONFIG.offline).label}
+                        />
+                        <span className="text-[12px] text-[#949ba4]">
+                          {(STATUS_CONFIG[selectedFriend.status || 'offline'] || STATUS_CONFIG.offline).label}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Messages history + Input */}
+                <div className="flex-1 flex flex-col min-h-0 min-w-0 bg-[#111214]">
+                  <div className="flex-1 overflow-y-auto px-4 py-6 space-y-4">
+                    {/* Beginning of conversation banner */}
+                    <div className="mb-8 select-none">
+                      <div className="w-20 h-20 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white ring-4 ring-[#232428] mb-3">
+                        {selectedFriend?.avatar ? (
+                          <img src={selectedFriend.avatar} alt="Avatar" className="w-full h-full object-cover" />
+                        ) : (
+                          <User className="w-10 h-10 text-[#ff6b00]" />
+                        )}
+                      </div>
+                      <h2 className="text-3xl font-bold text-white mb-1.5">
+                        {selectedFriend?.displayName || selectedDm}
+                      </h2>
+                      <p className="text-[#dbdee1] text-[16px] font-medium mb-1">
+                        This is the beginning of your direct message history with @{selectedFriend?.username || selectedDm}.
+                      </p>
+                      <p className="text-[#949ba4] text-[14px]">
+                        Say hello and start yapping!
+                      </p>
+                      <div className="h-[1px] bg-[#232428] mt-6" />
+                    </div>
+
+                    {/* Messages in this DM */}
+                    {dmChatMessages.map((msg) => (
+                      <ChatMessageItem
+                        key={msg.id}
+                        msg={msg}
+                        currentUsername={currentUsername}
+                        location="dm"
+                        onReply={(m) => setReplyTarget({ message: m, location: 'dm' })}
+                        onDelete={(m) => handleDeleteMessage(m, 'dm')}
+                        onToggleReaction={(m, emoji) => handleToggleReaction(m, emoji, 'dm')}
+                        onImageClick={(url) => setPreviewImageUrl(url)}
+                      />
+                    ))}
+                    <div ref={dmChatMessagesEndRef} />
+                  </div>
+
+                  {/* Chat Input Bar */}
+                  <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0">
+                    {/* Replying banner */}
+                    {replyTarget && replyTarget.location === 'dm' && (
+                      <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] px-3.5 py-1.5 flex items-center justify-between text-[12px] text-[#949ba4]">
+                        <div className="flex items-center gap-2 truncate">
+                          <Reply className="w-3.5 h-3.5 text-[#ff6b00] flex-shrink-0" />
+                          <span>Replying to</span>
+                          <span className="font-semibold text-white">
+                            @{replyTarget.message.authorDisplayName || replyTarget.message.authorUsername}
+                          </span>
+                          {replyTarget.message.text && (
+                            <span className="truncate max-w-xs text-[#80848e]">
+                              "{replyTarget.message.text}"
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setReplyTarget(null)}
+                          className="p-1 text-[#949ba4] hover:text-white rounded-[3px] cursor-pointer"
+                          title="Cancel reply"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Attachment Preview Banner */}
+                    {dmAttachment && (
+                      <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] p-2.5 flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-[4px] overflow-hidden bg-black/40 border border-[#2b2d31] flex items-center justify-center flex-shrink-0">
+                          <img src={dmAttachment.previewUrl} alt="Preview" className="w-full h-full object-cover" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[13px] font-medium text-white truncate">{dmAttachment.name}</div>
+                          <div className="text-[11px] text-[#ff6b00]">Image / GIF ready to upload</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setDmAttachment(null)}
+                          className="p-1 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white cursor-pointer mr-2"
+                          title="Remove attachment"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+
+                    <form
+                      onSubmit={handleSendDmMessage}
+                      className={`bg-[#1e1f22] border border-transparent focus-within:border-[#ff6b00]/40 flex items-center px-4 py-2.5 transition-colors ${
+                        replyTarget || dmAttachment ? 'rounded-b-[8px]' : 'rounded-[8px]'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => dmFileInputRef.current?.click()}
+                        className="w-6 h-6 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white flex items-center justify-center transition-colors cursor-pointer flex-shrink-0 mr-3"
+                        title="Upload Image or GIF (no MP4)"
+                      >
+                        <Plus className="w-4 h-4 stroke-[2.5]" />
+                      </button>
+
+                      <input
+                        type="text"
+                        value={chatInput}
+                        onChange={(e) => setChatInput(e.target.value)}
+                        placeholder={`Message @${selectedFriend?.displayName || selectedDm}`}
+                        className="bg-transparent text-white placeholder-[#949ba4] text-[15px] outline-none flex-1 pr-3"
+                      />
+
+                      <div className="flex items-center gap-2 text-[#949ba4]">
+                        <button
+                          type="button"
+                          onClick={() => setChatInput((prev) => prev + ' 😊')}
+                          className="hover:text-white transition-colors cursor-pointer p-1"
+                          title="Insert Emoji"
+                        >
+                          <Smile className="w-5 h-5" />
+                        </button>
+                        {(chatInput.trim() || dmAttachment) && (
+                          <button
+                            type="submit"
+                            disabled={isUploadingAttachment}
+                            className="p-1 text-[#ff6b00] hover:text-[#e55b00] disabled:opacity-50 transition-colors cursor-pointer"
+                            title="Send Message"
+                          >
+                            {isUploadingAttachment ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Send className="w-4 h-4" />
+                            )}
+                          </button>
+                        )}
+                      </div>
+                    </form>
+                  </div>
+                </div>
               </div>
             )
           ) : activeServerId === 'yapzo-hq' ? (
@@ -1968,57 +2460,82 @@ export default function App() {
                       <div className="h-[1px] bg-[#232428] mt-6" />
                     </div>
 
-                    {/* Rendered messages in this channel (real-time Firestore messages from all members) */}
+                    {/* Rendered messages in this channel */}
                     {(channelMessages[activeChannelId] || []).map((msg) => (
-                      <div
+                      <ChatMessageItem
                         key={msg.id}
-                        className="flex gap-4 py-1 px-3 -mx-3 hover:bg-[#18191c]/60 rounded-[4px] group transition-colors"
-                      >
-                        <div className="w-10 h-10 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white flex-shrink-0 mt-0.5 ring-2 ring-[#232428]">
-                          {msg.authorAvatar ? (
-                            <img src={msg.authorAvatar} alt="Avatar" className="w-full h-full object-cover" />
-                          ) : (
-                            <User className="w-5 h-5 text-[#ff6b00]" />
-                          )}
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-baseline gap-2">
-                            <span className="font-semibold text-white text-[15px] hover:underline cursor-pointer">
-                              {msg.authorDisplayName || msg.authorUsername || 'Member'}
-                            </span>
-                            <span className="text-[11px] text-[#949ba4]">
-                              {msg.timestamp}
-                            </span>
-                          </div>
-                          <p className="text-[15px] text-[#dbdee1] leading-relaxed break-words whitespace-pre-wrap select-text mt-0.5">
-                            {msg.text}
-                          </p>
-                        </div>
-                        {msg.authorUsername === currentUsername && (
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteChannelMessage(activeChannelId, msg.id)}
-                            className="opacity-0 group-hover:opacity-100 text-[#949ba4] hover:text-[#f23f43] p-1 transition-all cursor-pointer self-start"
-                            title="Delete message"
-                          >
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        )}
-                      </div>
+                        msg={msg}
+                        currentUsername={currentUsername}
+                        location="channel"
+                        onReply={(m) => setReplyTarget({ message: m, location: 'channel' })}
+                        onDelete={(m) => handleDeleteMessage(m, 'channel')}
+                        onToggleReaction={(m, emoji) => handleToggleReaction(m, emoji, 'channel')}
+                        onImageClick={(url) => setPreviewImageUrl(url)}
+                      />
                     ))}
                     <div ref={channelMessagesEndRef} />
                   </div>
 
                   {/* Channel Chat Input Bar */}
                   <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0">
+                    {/* Replying banner */}
+                    {replyTarget && replyTarget.location === 'channel' && (
+                      <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] px-3.5 py-1.5 flex items-center justify-between text-[12px] text-[#949ba4]">
+                        <div className="flex items-center gap-2 truncate">
+                          <Reply className="w-3.5 h-3.5 text-[#ff6b00] flex-shrink-0" />
+                          <span>Replying to</span>
+                          <span className="font-semibold text-white">
+                            @{replyTarget.message.authorDisplayName || replyTarget.message.authorUsername}
+                          </span>
+                          {replyTarget.message.text && (
+                            <span className="truncate max-w-xs text-[#80848e]">
+                              "{replyTarget.message.text}"
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setReplyTarget(null)}
+                          className="p-1 text-[#949ba4] hover:text-white rounded-[3px] cursor-pointer"
+                          title="Cancel reply"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Attachment Preview Banner */}
+                    {channelAttachment && (
+                      <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] p-2.5 flex items-center gap-3">
+                        <div className="w-12 h-12 rounded-[4px] overflow-hidden bg-black/40 border border-[#2b2d31] flex items-center justify-center flex-shrink-0">
+                          <img src={channelAttachment.previewUrl} alt="Preview" className="w-full h-full object-cover" />
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[13px] font-medium text-white truncate">{channelAttachment.name}</div>
+                          <div className="text-[11px] text-[#ff6b00]">Image / GIF ready to upload</div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setChannelAttachment(null)}
+                          className="p-1 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white cursor-pointer mr-2"
+                          title="Remove attachment"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </div>
+                    )}
+
                     <form
                       onSubmit={handleSendChannelMessage}
-                      className="rounded-[8px] bg-[#1e1f22] border border-transparent focus-within:border-[#ff6b00]/40 flex items-center px-4 py-2.5 transition-colors"
+                      className={`bg-[#1e1f22] border border-transparent focus-within:border-[#ff6b00]/40 flex items-center px-4 py-2.5 transition-colors ${
+                        replyTarget || channelAttachment ? 'rounded-b-[8px]' : 'rounded-[8px]'
+                      }`}
                     >
                       <button
                         type="button"
+                        onClick={() => channelFileInputRef.current?.click()}
                         className="w-6 h-6 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#949ba4] hover:text-white flex items-center justify-center transition-colors cursor-pointer flex-shrink-0 mr-3"
-                        title="Upload file (coming soon)"
+                        title="Upload Image or GIF (no MP4)"
                       >
                         <Plus className="w-4 h-4 stroke-[2.5]" />
                       </button>
@@ -2034,18 +2551,24 @@ export default function App() {
                       <div className="flex items-center gap-2 text-[#949ba4]">
                         <button
                           type="button"
+                          onClick={() => setChannelChatInput((prev) => prev + ' 😊')}
                           className="hover:text-white transition-colors cursor-pointer p-1"
                           title="Insert Emoji"
                         >
                           <Smile className="w-5 h-5" />
                         </button>
-                        {channelChatInput.trim() && (
+                        {(channelChatInput.trim() || channelAttachment) && (
                           <button
                             type="submit"
-                            className="p-1 text-[#ff6b00] hover:text-[#e55b00] transition-colors cursor-pointer"
+                            disabled={isUploadingAttachment}
+                            className="p-1 text-[#ff6b00] hover:text-[#e55b00] disabled:opacity-50 transition-colors cursor-pointer"
                             title="Send Message"
                           >
-                            <Send className="w-4 h-4" />
+                            {isUploadingAttachment ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Send className="w-4 h-4" />
+                            )}
                           </button>
                         )}
                       </div>
@@ -2498,6 +3021,63 @@ export default function App() {
             isUploading={isUploadingImage}
           />
         )}
+
+        {/* Fullscreen Image / GIF Lightbox Viewer Modal */}
+        {previewImageUrl && (
+          <div
+            className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex items-center justify-center p-4 select-none animate-in fade-in duration-150"
+            onClick={() => setPreviewImageUrl(null)}
+          >
+            <div
+              className="relative max-w-5xl max-h-[92vh] flex flex-col items-center"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="w-full flex items-center justify-between py-2 text-white/80">
+                <a
+                  href={previewImageUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-[13px] text-[#ff8f3d] hover:underline flex items-center gap-1.5 font-medium"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  <span>Open original in new tab</span>
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setPreviewImageUrl(null)}
+                  className="w-8 h-8 rounded-full bg-[#18191c] hover:bg-[#2b2d31] flex items-center justify-center text-white cursor-pointer transition-colors shadow-md"
+                  title="Close (Esc)"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="rounded-[8px] overflow-hidden shadow-2xl border border-[#232428] bg-[#111214] max-h-[82vh] flex items-center justify-center">
+                <img
+                  src={previewImageUrl}
+                  alt="Full preview"
+                  className="max-h-[82vh] max-w-full object-contain select-text"
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Hidden file inputs for Chat attachments (Images and GIFs only, no MP4) */}
+        <input
+          type="file"
+          ref={channelFileInputRef}
+          onChange={(e) => handleFileChange(e, 'channel')}
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          className="hidden"
+        />
+        <input
+          type="file"
+          ref={dmFileInputRef}
+          onChange={(e) => handleFileChange(e, 'dm')}
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          className="hidden"
+        />
       </div>
     );
   }

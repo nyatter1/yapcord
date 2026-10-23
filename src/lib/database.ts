@@ -37,16 +37,37 @@ export interface UserProfile {
   newsletter?: boolean;
 }
 
+export interface MessageReplyInfo {
+  id: string;
+  text?: string;
+  imageUrl?: string;
+  authorDisplayName: string;
+  authorUsername: string;
+}
+
 export interface ChatMessage {
   id: string;
   channelId?: string;
   text: string;
+  imageUrl?: string;
   authorId: string;
   authorUsername: string;
   authorDisplayName: string;
   authorAvatar: string | null;
   timestamp: string;
   createdAt: number;
+  replyTo?: MessageReplyInfo | null;
+  reactions?: Record<string, string[]>;
+}
+
+export interface FriendItem {
+  id: string; // clean username key
+  username: string;
+  displayName: string;
+  avatar: string | null;
+  status?: UserStatus;
+  aboutMe?: string;
+  addedAt: number;
 }
 
 /**
@@ -295,4 +316,233 @@ export async function deleteChannelMessage(channelId: string, messageId: string)
   const channelKey = normalizeKey(channelId);
   const msgRef = ref(rtdb, `channels/${channelKey}/messages/${messageId}`);
   await remove(msgRef);
+}
+
+/**
+ * Generates a deterministic DM chat ID between two users (alphabetical order).
+ */
+export function getDmChatId(userA: string, userB: string): string {
+  const keyA = normalizeKey(userA);
+  const keyB = normalizeKey(userB);
+  return [keyA, keyB].sort().join('__');
+}
+
+/**
+ * Real-time listener for direct messages between two users in Realtime Database.
+ */
+export function subscribeToDmMessages(
+  userA: string,
+  userB: string,
+  callback: (messages: ChatMessage[]) => void
+): () => void {
+  const dmChatId = getDmChatId(userA, userB);
+  const messagesQuery = query(ref(rtdb, `direct_messages/${dmChatId}/messages`), limitToLast(150));
+
+  const unsubscribe = onValue(
+    messagesQuery,
+    (snapshot) => {
+      const msgs: ChatMessage[] = [];
+      if (snapshot.exists()) {
+        const val = snapshot.val();
+        Object.keys(val).forEach((id) => {
+          msgs.push({
+            id,
+            ...val[id]
+          });
+        });
+        msgs.sort((a, b) => a.createdAt - b.createdAt);
+      }
+      callback(msgs);
+    },
+    (error) => {
+      console.warn(`Realtime Database DM (${dmChatId}) listener warning:`, error);
+    }
+  );
+
+  return unsubscribe;
+}
+
+/**
+ * Sends a direct message between two users in Realtime Database.
+ */
+export async function sendDmMessage(
+  userA: string,
+  userB: string,
+  message: Omit<ChatMessage, 'id'>
+): Promise<string> {
+  const dmChatId = getDmChatId(userA, userB);
+  const messagesRef = ref(rtdb, `direct_messages/${dmChatId}/messages`);
+  const newMsgRef = push(messagesRef);
+  await set(newMsgRef, message);
+  return newMsgRef.key || `${Date.now()}`;
+}
+
+/**
+ * Deletes a direct message from Realtime Database.
+ */
+export async function deleteDmMessage(dmChatId: string, messageId: string): Promise<void> {
+  const msgRef = ref(rtdb, `direct_messages/${dmChatId}/messages/${messageId}`);
+  await remove(msgRef);
+}
+
+/**
+ * Generic message deleter for channel, DM, or self notes.
+ */
+export async function deleteMessage(
+  type: 'channel' | 'self' | 'dm',
+  contextKey: string,
+  messageId: string
+): Promise<void> {
+  let path = '';
+  if (type === 'channel') {
+    path = `channels/${normalizeKey(contextKey)}/messages/${messageId}`;
+  } else if (type === 'self') {
+    path = `self_notes/${normalizeKey(contextKey)}/${messageId}`;
+  } else {
+    path = `direct_messages/${contextKey}/messages/${messageId}`;
+  }
+  const targetRef = ref(rtdb, path);
+  await remove(targetRef);
+}
+
+/**
+ * Toggles a user's reaction on a message in Realtime Database.
+ */
+export async function toggleMessageReaction(
+  type: 'channel' | 'self' | 'dm',
+  contextKey: string,
+  messageId: string,
+  emoji: string,
+  username: string
+): Promise<void> {
+  let path = '';
+  if (type === 'channel') {
+    path = `channels/${normalizeKey(contextKey)}/messages/${messageId}/reactions`;
+  } else if (type === 'self') {
+    path = `self_notes/${normalizeKey(contextKey)}/${messageId}/reactions`;
+  } else {
+    path = `direct_messages/${contextKey}/messages/${messageId}/reactions`;
+  }
+
+  const reactionsRef = ref(rtdb, path);
+  const snap = await get(reactionsRef);
+  const reactions: Record<string, string[]> = snap.exists() ? snap.val() : {};
+
+  const cleanUser = normalizeKey(username);
+  const currentUsers: string[] = Array.isArray(reactions[emoji]) ? reactions[emoji] : [];
+
+  if (currentUsers.includes(cleanUser)) {
+    // User already reacted -> remove
+    const filtered = currentUsers.filter((u) => u !== cleanUser);
+    if (filtered.length > 0) {
+      reactions[emoji] = filtered;
+    } else {
+      delete reactions[emoji];
+    }
+  } else {
+    // Add reaction
+    reactions[emoji] = [...currentUsers, cleanUser];
+  }
+
+  await set(reactionsRef, reactions);
+}
+
+/**
+ * Adds a friend by target handle or email.
+ */
+export async function addFriend(
+  myProfile: UserProfile,
+  targetHandleOrEmail: string
+): Promise<{ success: boolean; error?: string; friend?: FriendItem }> {
+  const cleanTarget = targetHandleOrEmail.trim().toLowerCase();
+  const myClean = normalizeKey(myProfile.username);
+
+  if (cleanTarget === myClean || cleanTarget === myProfile.email?.toLowerCase()) {
+    return { success: false, error: "You cannot add yourself as a friend!" };
+  }
+
+  const targetUser = await findUserByHandleOrEmail(cleanTarget);
+  if (!targetUser) {
+    return { success: false, error: `No Yapzo user found with handle or email "${targetHandleOrEmail}".` };
+  }
+
+  const targetClean = normalizeKey(targetUser.username);
+  if (targetClean === myClean) {
+    return { success: false, error: "You cannot add yourself as a friend!" };
+  }
+
+  const myFriendEntry: FriendItem = {
+    id: targetClean,
+    username: targetUser.username,
+    displayName: targetUser.displayName || targetUser.username,
+    avatar: targetUser.avatar || null,
+    status: targetUser.status || 'offline',
+    aboutMe: targetUser.aboutMe || '',
+    addedAt: Date.now()
+  };
+
+  const theirFriendEntry: FriendItem = {
+    id: myClean,
+    username: myProfile.username,
+    displayName: myProfile.displayName || myProfile.username,
+    avatar: myProfile.avatar || null,
+    status: myProfile.status || 'online',
+    aboutMe: myProfile.aboutMe || '',
+    addedAt: Date.now()
+  };
+
+  const updates: Record<string, any> = {};
+  updates[`friends/${myClean}/${targetClean}`] = myFriendEntry;
+  updates[`friends/${targetClean}/${myClean}`] = theirFriendEntry;
+
+  await update(ref(rtdb), updates);
+
+  return { success: true, friend: myFriendEntry };
+}
+
+/**
+ * Removes a friend.
+ */
+export async function removeFriend(myUsername: string, targetUsername: string): Promise<void> {
+  const myClean = normalizeKey(myUsername);
+  const targetClean = normalizeKey(targetUsername);
+
+  const updates: Record<string, any> = {};
+  updates[`friends/${myClean}/${targetClean}`] = null;
+  updates[`friends/${targetClean}/${myClean}`] = null;
+
+  await update(ref(rtdb), updates);
+}
+
+/**
+ * Real-time listener for user's friends in Realtime Database.
+ */
+export function subscribeToFriends(
+  myUsername: string,
+  callback: (friends: FriendItem[]) => void
+): () => void {
+  const myClean = normalizeKey(myUsername);
+  const friendsRef = ref(rtdb, `friends/${myClean}`);
+
+  const unsubscribe = onValue(
+    friendsRef,
+    (snapshot) => {
+      const list: FriendItem[] = [];
+      if (snapshot.exists()) {
+        const val = snapshot.val();
+        Object.keys(val).forEach((k) => {
+          if (val[k]) {
+            list.push({ ...val[k], id: k });
+          }
+        });
+        list.sort((a, b) => b.addedAt - a.addedAt);
+      }
+      callback(list);
+    },
+    (error) => {
+      console.warn('Realtime Database friends listener warning:', error);
+    }
+  );
+
+  return unsubscribe;
 }
