@@ -12,6 +12,381 @@ import {
 } from 'firebase/database';
 import { rtdb } from './firebase';
 
+// ── Server types ──────────────────────────────────────────────────────────
+
+export interface ServerData {
+  id: string;
+  name: string;
+  description?: string;
+  icon: string | null;
+  banner?: string | null;
+  ownerId: string;
+  ownerUsername: string;
+  ownerDisplayName: string;
+  createdAt: number;
+  isPublic: boolean;
+  memberCount: number;
+  channels: ServerChannelData[];
+}
+
+export interface ServerChannelData {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+}
+
+export interface ServerMember {
+  userId: string;
+  username: string;
+  displayName: string;
+  avatar: string | null;
+  joinedAt: number;
+}
+
+export interface ServerInvite {
+  code: string;
+  serverId: string;
+  serverName: string;
+  serverIcon: string | null;
+  createdBy: string;
+  createdAt: number;
+  expiresAt: number | null; // null = never
+  maxUses: number | null; // null = unlimited
+  uses: number;
+}
+
+const DEFAULT_CHANNELS: ServerChannelData[] = [
+  { id: 'welcome', name: 'welcome', description: 'Welcome to the server! Say hello here.', category: 'Information' },
+  { id: 'general', name: 'general', description: 'General discussion for everyone.', category: 'Text Channels' },
+  { id: 'off-topic', name: 'off-topic', description: 'Casual conversation and random thoughts.', category: 'Text Channels' }
+];
+
+function generateInviteCode(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let code = '';
+  for (let i = 0; i < 8; i++) {
+    code += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return code;
+}
+
+export async function createServer(
+  owner: { userId: string; username: string; displayName: string; avatar: string | null },
+  data: { name: string; description?: string; icon?: string | null; banner?: string | null; isPublic?: boolean }
+): Promise<string> {
+  const serverId = `srv_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const server: ServerData = {
+    id: serverId,
+    name: data.name,
+    description: data.description || '',
+    icon: data.icon || null,
+    banner: data.banner || null,
+    ownerId: owner.userId,
+    ownerUsername: owner.username,
+    ownerDisplayName: owner.displayName,
+    createdAt: Date.now(),
+    isPublic: data.isPublic ?? false,
+    memberCount: 1,
+    channels: DEFAULT_CHANNELS
+  };
+
+  const member: ServerMember = {
+    userId: owner.userId,
+    username: owner.username,
+    displayName: owner.displayName,
+    avatar: owner.avatar || null,
+    joinedAt: Date.now()
+  };
+
+  const updates: Record<string, any> = {};
+  updates[`servers/${serverId}`] = cleanUndefined(server);
+  updates[`server_members/${serverId}/${normalizeKey(owner.userId)}`] = cleanUndefined(member);
+  updates[`user_servers/${normalizeKey(owner.userId)}/${serverId}`] = true;
+
+  await update(ref(rtdb), updates);
+  return serverId;
+}
+
+export function subscribeToUserServers(
+  userId: string,
+  callback: (servers: ServerData[]) => void
+): () => void {
+  const userServersRef = ref(rtdb, `user_servers/${normalizeKey(userId)}`);
+
+  const unsubscribe = onValue(userServersRef, async (snapshot) => {
+    if (!snapshot.exists()) {
+      callback([]);
+      return;
+    }
+    const serverIds = Object.keys(snapshot.val());
+    const servers: ServerData[] = [];
+    for (const sid of serverIds) {
+      const srvSnap = await get(child(ref(rtdb), `servers/${sid}`));
+      if (srvSnap.exists()) {
+        servers.push({ ...srvSnap.val(), id: sid });
+      }
+    }
+    servers.sort((a, b) => a.createdAt - b.createdAt);
+    callback(servers);
+  });
+
+  return unsubscribe;
+}
+
+export function subscribeToPublicServers(
+  callback: (servers: ServerData[]) => void
+): () => void {
+  const serversRef = ref(rtdb, 'servers');
+
+  const unsubscribe = onValue(serversRef, (snapshot) => {
+    if (!snapshot.exists()) {
+      callback([]);
+      return;
+    }
+    const val = snapshot.val();
+    const servers: ServerData[] = [];
+    for (const sid of Object.keys(val)) {
+      const s = val[sid];
+      if (s && s.isPublic) {
+        servers.push({ ...s, id: sid });
+      }
+    }
+    servers.sort((a, b) => (b.memberCount || 0) - (a.memberCount || 0));
+    callback(servers);
+  });
+
+  return unsubscribe;
+}
+
+export async function joinServer(serverId: string, user: { userId: string; username: string; displayName: string; avatar: string | null }): Promise<{ success: boolean; error?: string }> {
+  const serverSnap = await get(child(ref(rtdb), `servers/${serverId}`));
+  if (!serverSnap.exists()) {
+    return { success: false, error: 'Server not found' };
+  }
+
+  const member: ServerMember = {
+    userId: user.userId,
+    username: user.username,
+    displayName: user.displayName,
+    avatar: user.avatar || null,
+    joinedAt: Date.now()
+  };
+
+  const updates: Record<string, any> = {};
+  updates[`server_members/${serverId}/${normalizeKey(user.userId)}`] = cleanUndefined(member);
+  updates[`user_servers/${normalizeKey(user.userId)}/${serverId}`] = true;
+
+  // Increment member count
+  const server = serverSnap.val() as ServerData;
+  updates[`servers/${serverId}/memberCount`] = (server.memberCount || 0) + 1;
+
+  await update(ref(rtdb), updates);
+  return { success: true };
+}
+
+export async function leaveServer(serverId: string, userId: string): Promise<void> {
+  const updates: Record<string, any> = {};
+  updates[`server_members/${serverId}/${normalizeKey(userId)}`] = null;
+  updates[`user_servers/${normalizeKey(userId)}/${serverId}`] = null;
+
+  // Decrement member count
+  const serverSnap = await get(child(ref(rtdb), `servers/${serverId}`));
+  if (serverSnap.exists()) {
+    const server = serverSnap.val() as ServerData;
+    updates[`servers/${serverId}/memberCount`] = Math.max(0, (server.memberCount || 1) - 1);
+  }
+
+  await update(ref(rtdb), updates);
+}
+
+export async function deleteServer(serverId: string): Promise<void> {
+  const serverSnap = await get(child(ref(rtdb), `servers/${serverId}`));
+  if (!serverSnap.exists()) return;
+
+  const updates: Record<string, any> = {};
+  updates[`servers/${serverId}`] = null;
+  updates[`server_members/${serverId}`] = null;
+  updates[`server_invites/${serverId}`] = null;
+
+  // Remove from all users' server lists
+  const membersSnap = await get(child(ref(rtdb), `server_members/${serverId}`));
+  if (membersSnap.exists()) {
+    const members = membersSnap.val();
+    for (const mKey of Object.keys(members)) {
+      const member = members[mKey] as ServerMember;
+      updates[`user_servers/${normalizeKey(member.userId)}/${serverId}`] = null;
+    }
+  }
+
+  await update(ref(rtdb), updates);
+}
+
+export async function updateServer(serverId: string, partial: Partial<ServerData>): Promise<void> {
+  const serverRef = ref(rtdb, `servers/${serverId}`);
+  await update(serverRef, cleanUndefined(partial));
+}
+
+export function subscribeToServerMembers(
+  serverId: string,
+  callback: (members: ServerMember[]) => void
+): () => void {
+  const membersRef = ref(rtdb, `server_members/${serverId}`);
+
+  const unsubscribe = onValue(membersRef, (snapshot) => {
+    const members: ServerMember[] = [];
+    if (snapshot.exists()) {
+      const val = snapshot.val();
+      for (const k of Object.keys(val)) {
+        members.push({ ...val[k] });
+      }
+    }
+    members.sort((a, b) => a.joinedAt - b.joinedAt);
+    callback(members);
+  });
+
+  return unsubscribe;
+}
+
+export async function createInvite(serverId: string, createdBy: string, options?: { expiresInHours?: number | null; maxUses?: number | null }): Promise<ServerInvite> {
+  const serverSnap = await get(child(ref(rtdb), `servers/${serverId}`));
+  if (!serverSnap.exists()) throw new Error('Server not found');
+  const server = serverSnap.val() as ServerData;
+
+  const code = generateInviteCode();
+  const now = Date.now();
+  const invite: ServerInvite = {
+    code,
+    serverId,
+    serverName: server.name,
+    serverIcon: server.icon || null,
+    createdBy,
+    createdAt: now,
+    expiresAt: options?.expiresInHours ? now + options.expiresInHours * 3600000 : null,
+    maxUses: options?.maxUses ?? null,
+    uses: 0
+  };
+
+  await set(ref(rtdb, `server_invites/${serverId}/${code}`), cleanUndefined(invite));
+  await set(ref(rtdb, `invite_codes/${code}`), { serverId });
+  return invite;
+}
+
+export function subscribeToServerInvites(
+  serverId: string,
+  callback: (invites: ServerInvite[]) => void
+): () => void {
+  const invitesRef = ref(rtdb, `server_invites/${serverId}`);
+
+  const unsubscribe = onValue(invitesRef, (snapshot) => {
+    const invites: ServerInvite[] = [];
+    if (snapshot.exists()) {
+      const val = snapshot.val();
+      for (const k of Object.keys(val)) {
+        invites.push({ ...val[k], code: k });
+      }
+    }
+    invites.sort((a, b) => b.createdAt - a.createdAt);
+    callback(invites);
+  });
+
+  return unsubscribe;
+}
+
+export async function revokeInvite(serverId: string, code: string): Promise<void> {
+  const updates: Record<string, any> = {};
+  updates[`server_invites/${serverId}/${code}`] = null;
+  updates[`invite_codes/${code}`] = null;
+  await update(ref(rtdb), updates);
+}
+
+export async function joinServerByInvite(
+  code: string,
+  user: { userId: string; username: string; displayName: string; avatar: string | null }
+): Promise<{ success: boolean; error?: string; serverId?: string }> {
+  const codeSnap = await get(child(ref(rtdb), `invite_codes/${code}`));
+  if (!codeSnap.exists()) {
+    return { success: false, error: 'Invalid or expired invite code' };
+  }
+
+  const serverId = codeSnap.val() as string;
+  const inviteSnap = await get(child(ref(rtdb), `server_invites/${serverId}/${code}`));
+  if (!inviteSnap.exists()) {
+    return { success: false, error: 'This invite has been revoked' };
+  }
+
+  const invite = inviteSnap.val() as ServerInvite;
+
+  if (invite.expiresAt && Date.now() > invite.expiresAt) {
+    return { success: false, error: 'This invite has expired' };
+  }
+
+  if (invite.maxUses !== null && invite.uses >= invite.maxUses) {
+    return { success: false, error: 'This invite has reached its maximum uses' };
+  }
+
+  // Check if already a member
+  const memberSnap = await get(child(ref(rtdb), `server_members/${serverId}/${normalizeKey(user.userId)}`));
+  if (memberSnap.exists()) {
+    return { success: false, error: 'You are already a member of this server' };
+  }
+
+  const result = await joinServer(serverId, user);
+  if (!result.success) return result;
+
+  // Increment invite uses
+  await update(ref(rtdb, `server_invites/${serverId}/${code}`), { uses: invite.uses + 1 });
+
+  return { success: true, serverId };
+}
+
+export function subscribeToServerChannels(
+  serverId: string,
+  callback: (channels: ServerChannelData[]) => void
+): () => void {
+  const channelsRef = ref(rtdb, `servers/${serverId}/channels`);
+
+  const unsubscribe = onValue(channelsRef, (snapshot) => {
+    if (!snapshot.exists()) {
+      callback(DEFAULT_CHANNELS);
+      return;
+    }
+    const val = snapshot.val();
+    if (Array.isArray(val)) {
+      callback(val);
+    } else {
+      const channels: ServerChannelData[] = [];
+      for (const k of Object.keys(val)) {
+        channels.push(val[k]);
+      }
+      callback(channels);
+    }
+  });
+
+  return unsubscribe;
+}
+
+export async function addServerChannel(serverId: string, channel: ServerChannelData): Promise<void> {
+  const channelsSnap = await get(child(ref(rtdb), `servers/${serverId}/channels`));
+  let channels: ServerChannelData[] = [];
+  if (channelsSnap.exists()) {
+    const val = channelsSnap.val();
+    if (Array.isArray(val)) {
+      channels = val;
+    } else {
+      channels = Object.values(val);
+    }
+  }
+  channels.push(channel);
+  await update(ref(rtdb, `servers/${serverId}`), { channels: cleanUndefined(channels) });
+}
+
+export async function getServerById(serverId: string): Promise<ServerData | null> {
+  const snap = await get(child(ref(rtdb), `servers/${serverId}`));
+  if (!snap.exists()) return null;
+  return { ...snap.val(), id: serverId } as ServerData;
+}
+
 export type UserStatus = 'online' | 'idle' | 'dnd' | 'offline';
 
 export interface UserProfile {

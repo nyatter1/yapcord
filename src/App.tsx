@@ -88,6 +88,22 @@ import { EmojiPicker } from './components/EmojiPicker';
 import { TypingIndicator } from './components/TypingIndicator';
 import { MentionAutocomplete, MentionCandidate } from './components/MentionAutocomplete';
 import { ServerSettingsModal } from './components/ServerSettingsModal';
+import { CreateServerModal } from './components/CreateServerModal';
+import { DiscoverServersModal } from './components/DiscoverServersModal';
+import { InviteManagerModal } from './components/InviteManagerModal';
+import { JoinByInviteModal } from './components/JoinByInviteModal';
+import {
+  ServerData,
+  ServerChannelData,
+  ServerMember,
+  subscribeToUserServers,
+  subscribeToServerChannels,
+  subscribeToServerMembers,
+  joinServer,
+  leaveServer,
+  deleteServer,
+  updateServer,
+} from './lib/database';
 
 type Screen = 'auth' | 'step1' | 'step2' | 'loading' | 'app';
 type AuthMode = 'login' | 'register';
@@ -437,6 +453,24 @@ export default function App() {
   const [isServerSettingsOpen, setIsServerSettingsOpen] = useState(false);
   const [showServerDropdown, setShowServerDropdown] = useState(false);
   const serverDropdownRef = useRef<HTMLDivElement>(null);
+
+  // Custom servers state
+  const [userServers, setUserServers] = useState<ServerData[]>([]);
+  const [customServerChannels, setCustomServerChannels] = useState<ServerChannelData[]>([]);
+  const [customServerMembers, setCustomServerMembers] = useState<ServerMember[]>([]);
+  const [activeCustomChannelId, setActiveCustomChannelId] = useState<string>('general');
+  const [customChannelMessages, setCustomChannelMessages] = useState<Record<string, ChatMessage[]>>({});
+
+  // Modal states
+  const [showCreateServer, setShowCreateServer] = useState(false);
+  const [showDiscover, setShowDiscover] = useState(false);
+  const [showJoinByInvite, setShowJoinByInvite] = useState(false);
+  const [showInviteManager, setShowInviteManager] = useState(false);
+  const [inviteManagerServerId, setInviteManagerServerId] = useState<string | null>(null);
+  const [inviteManagerServerName, setInviteManagerServerName] = useState<string>('');
+  const [customServerError, setCustomServerError] = useState<string | null>(null);
+  const [showCustomServerMenu, setShowCustomServerMenu] = useState<string | null>(null);
+  const customServerMenuRef = useRef<HTMLDivElement>(null);
 
   // DMs / Friends header tab and sort filter state
   const [dmTab, setDmTab] = useState<'dms' | 'friends'>(initialSession?.dmTab || 'dms');
