@@ -35,6 +35,8 @@ export interface UserProfile {
     year: string;
   };
   newsletter?: boolean;
+  pinnedDms?: Record<string, boolean>;
+  clearedDms?: Record<string, number>;
 }
 
 export interface MessageReplyInfo {
@@ -599,3 +601,35 @@ export function subscribeToFriends(
 
   return unsubscribe;
 }
+
+/**
+ * Toggles a pinned DM for a user in Realtime Database.
+ */
+export async function togglePinDm(
+  userId: string,
+  targetDmKey: string,
+  isPinned: boolean
+): Promise<void> {
+  const userKey = normalizeKey(userId);
+  const dmKey = normalizeKey(targetDmKey);
+  const pinRef = ref(rtdb, `users/${userKey}/pinnedDms/${dmKey}`);
+  if (isPinned) {
+    await set(pinRef, true);
+  } else {
+    await remove(pinRef);
+  }
+}
+
+/**
+ * Clears DM chat history for a single user locally in Realtime Database.
+ */
+export async function clearUserDmChat(
+  userId: string,
+  targetDmKey: string
+): Promise<void> {
+  const userKey = normalizeKey(userId);
+  const dmKey = normalizeKey(targetDmKey);
+  const clearRef = ref(rtdb, `users/${userKey}/clearedDms/${dmKey}`);
+  await set(clearRef, Date.now());
+}
+

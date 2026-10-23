@@ -31,7 +31,9 @@ import {
   ExternalLink,
   MessageSquare,
   UserPlus,
-  UserCheck
+  UserCheck,
+  Pin,
+  PinOff
 } from 'lucide-react';
 import { uploadToCloudinary } from './lib/cloudinary';
 import {
@@ -59,7 +61,9 @@ import {
   removeFriend,
   acceptFriendRequest,
   declineFriendRequest,
-  subscribeToFriends
+  subscribeToFriends,
+  togglePinDm,
+  clearUserDmChat
 } from './lib/database';
 import { ChatMessageItem } from './components/ChatMessageItem';
 import { FriendsView } from './components/FriendsView';
@@ -461,6 +465,116 @@ export default function App() {
     regUsername.trim() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : 'juxtopposed');
 
   const selectedFriend = friends.find((f) => f.username.toLowerCase() === selectedDm.toLowerCase()) || null;
+
+  // DM Right-click Context Menu State
+  const [dmContextMenu, setDmContextMenu] = useState<{
+    x: number;
+    y: number;
+    targetDm: string;
+    targetDisplayName: string;
+    targetAvatar: string | null;
+  } | null>(null);
+
+  // Local state for pinned and cleared DMs
+  const [localPinnedDms, setLocalPinnedDms] = useState<Record<string, boolean>>({});
+  const [localClearedDms, setLocalClearedDms] = useState<Record<string, number>>({});
+
+  // Sync user's pinned and cleared DMs from allUsers profile
+  const loggedInUserProfile = allUsers.find(
+    (u) => u.username.toLowerCase() === currentUsername.toLowerCase()
+  );
+
+  useEffect(() => {
+    if (loggedInUserProfile) {
+      if (loggedInUserProfile.pinnedDms) {
+        setLocalPinnedDms(loggedInUserProfile.pinnedDms);
+      }
+      if (loggedInUserProfile.clearedDms) {
+        setLocalClearedDms(loggedInUserProfile.clearedDms);
+      }
+    }
+  }, [loggedInUserProfile]);
+
+  const handleTogglePinDm = async (targetDm: string) => {
+    const key = targetDm.toLowerCase();
+    const isCurrentlyPinned = !!localPinnedDms[key];
+    const willBePinned = !isCurrentlyPinned;
+
+    setLocalPinnedDms((prev) => {
+      const next = { ...prev };
+      if (willBePinned) next[key] = true;
+      else delete next[key];
+      return next;
+    });
+
+    try {
+      await togglePinDm(currentUsername, key, willBePinned);
+    } catch (err) {
+      console.error('Error toggling pin DM:', err);
+    }
+    setDmContextMenu(null);
+  };
+
+  const handleClearDmChat = async (targetDm: string) => {
+    const key = targetDm.toLowerCase();
+    const now = Date.now();
+
+    setLocalClearedDms((prev) => ({
+      ...prev,
+      [key]: now
+    }));
+
+    try {
+      await clearUserDmChat(currentUsername, key);
+    } catch (err) {
+      console.error('Error clearing DM chat:', err);
+    }
+    setDmContextMenu(null);
+  };
+
+  // Filter messages based on localClearedDms
+  const selfClearedAt = localClearedDms['self'] || 0;
+  const displayedSelfMessages = selfMessages.filter((m) => m.createdAt > selfClearedAt);
+
+  const dmClearedAt = localClearedDms[selectedDm.toLowerCase()] || 0;
+  const displayedDmMessages = dmChatMessages.filter((m) => m.createdAt > dmClearedAt);
+
+  // All DM items list (Self note + Friends) with pinned status
+  const allDmItems = [
+    {
+      key: 'self',
+      isSelf: true,
+      username: 'self',
+      displayName: currentDisplayName,
+      avatar: avatarPreview,
+      status: userStatus,
+      isPinned: !!localPinnedDms['self'],
+      subtitle:
+        displayedSelfMessages.length > 0
+          ? displayedSelfMessages[displayedSelfMessages.length - 1].text || '[Image]'
+          : 'Message yourself'
+    },
+    ...friends.map((friend) => ({
+      key: friend.username.toLowerCase(),
+      isSelf: false,
+      username: friend.username,
+      displayName: friend.displayName || friend.username,
+      avatar: friend.avatar,
+      status: friend.status || 'offline',
+      isPinned: !!localPinnedDms[friend.username.toLowerCase()],
+      subtitle: `@${friend.username}`
+    }))
+  ];
+
+  // Pinned DMs sorted at top of sidebar DM list
+  const sortedDmItems = [...allDmItems].sort((a, b) => {
+    if (a.isPinned && !b.isPinned) return -1;
+    if (!a.isPinned && b.isPinned) return 1;
+    return 0;
+  });
+
+  // Pinned DM shortcuts for top-left server column
+  const pinnedDmShortcuts = allDmItems.filter((item) => item.isPinned);
 
   // Loading screen tip index
   const [currentTipIndex, setCurrentTipIndex] = useState(0);
@@ -1471,6 +1585,57 @@ export default function App() {
               </button>
             </div>
 
+            {/* PINNED DM SHORTCUT AVATARS UNDER DIRECT MESSAGES ICON */}
+            {pinnedDmShortcuts.map((item) => {
+              const isActive = isHomeSelected && selectedDm.toLowerCase() === item.username.toLowerCase();
+              const statusInfo = STATUS_CONFIG[item.status] || STATUS_CONFIG.offline;
+              return (
+                <div key={item.key} className="relative flex items-center justify-center w-full group my-0.5">
+                  <div
+                    className={`absolute left-0 w-1 rounded-r-full bg-[#ff6b00] transition-all duration-200 ${
+                      isActive ? 'h-10' : 'h-0 group-hover:h-5'
+                    }`}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsHomeSelected(true);
+                      setActiveServerId(null);
+                      setDmTab('dms');
+                      setSelectedDm(item.username);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      setDmContextMenu({
+                        x: e.clientX,
+                        y: e.clientY,
+                        targetDm: item.username,
+                        targetDisplayName: item.displayName,
+                        targetAvatar: item.avatar
+                      });
+                    }}
+                    className={`w-12 h-12 relative flex items-center justify-center transition-all duration-200 cursor-pointer overflow-hidden ${
+                      isActive
+                        ? 'rounded-[16px] ring-2 ring-[#ff6b00] shadow-[0_0_12px_rgba(255,107,0,0.3)]'
+                        : 'rounded-[24px] hover:rounded-[16px] bg-[#18191c]'
+                    }`}
+                    title={`Pinned DM: ${item.displayName}`}
+                  >
+                    {item.avatar ? (
+                      <img src={item.avatar} alt={item.displayName} className="w-full h-full object-cover" />
+                    ) : (
+                      <div className="w-full h-full bg-[#2b2d31] flex items-center justify-center text-white font-bold text-[16px]">
+                        {item.displayName.charAt(0).toUpperCase()}
+                      </div>
+                    )}
+                    <div
+                      className={`absolute bottom-0.5 right-0.5 w-3 h-3 rounded-full border-2 border-[#111214] ${statusInfo.bgClass}`}
+                    />
+                  </button>
+                </div>
+              );
+            })}
+
             {/* Separator */}
             <div className="w-8 h-[2px] bg-[#232428] rounded my-0.5" />
 
@@ -1686,53 +1851,24 @@ export default function App() {
                       <span>Direct Messages</span>
                     </div>
 
-                    {/* DM OF YOURSELF */}
-                    <div
-                      onClick={() => setSelectedDm('self')}
-                      className={`flex items-center gap-3 px-2 py-2 rounded-[5px] cursor-pointer transition-colors group select-none ${
-                        selectedDm === 'self'
-                          ? 'bg-[#2b2d31] text-white shadow-xs'
-                          : 'hover:bg-[#232428] text-[#949ba4] hover:text-[#dbdee1]'
-                      }`}
-                    >
-                      <div className="relative flex-shrink-0">
-                        <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-1 ring-[#232428]">
-                          {avatarPreview ? (
-                            <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
-                          ) : (
-                            <User className="w-4 h-4 text-[#ff6b00]" />
-                          )}
-                        </div>
-                        <div
-                          className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#18191c] ${
-                            STATUS_CONFIG[userStatus].bgClass
-                          }`}
-                        />
-                      </div>
-
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-[14px] font-medium truncate text-white">
-                            {currentDisplayName}
-                          </span>
-                          <span className="text-[11px] text-[#80848e] bg-[#232428] px-1 rounded-[3px]">You</span>
-                        </div>
-                        <p className="text-[12px] text-[#949ba4] truncate mt-0.5">
-                          {selfMessages.length > 0
-                            ? selfMessages[selfMessages.length - 1].text || '[Image]'
-                            : 'Message yourself'}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* ADDED FRIENDS DMs */}
-                    {friends.map((friend) => {
-                      const isSelected = selectedDm.toLowerCase() === friend.username.toLowerCase();
-                      const statusInfo = STATUS_CONFIG[friend.status || 'offline'] || STATUS_CONFIG.offline;
+                    {/* DM CONVERSATIONS LIST (SORTED: PINNED FIRST, WITH RIGHT CLICK CONTEXT MENU) */}
+                    {sortedDmItems.map((item) => {
+                      const isSelected = selectedDm.toLowerCase() === item.username.toLowerCase();
+                      const statusInfo = STATUS_CONFIG[item.status] || STATUS_CONFIG.offline;
                       return (
                         <div
-                          key={friend.id}
-                          onClick={() => setSelectedDm(friend.username)}
+                          key={item.key}
+                          onClick={() => setSelectedDm(item.username)}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            setDmContextMenu({
+                              x: e.clientX,
+                              y: e.clientY,
+                              targetDm: item.username,
+                              targetDisplayName: item.displayName,
+                              targetAvatar: item.avatar
+                            });
+                          }}
                           className={`flex items-center gap-3 px-2 py-2 rounded-[5px] cursor-pointer transition-colors group select-none ${
                             isSelected
                               ? 'bg-[#2b2d31] text-white shadow-xs'
@@ -1741,8 +1877,8 @@ export default function App() {
                         >
                           <div className="relative flex-shrink-0">
                             <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-1 ring-[#232428]">
-                              {friend.avatar ? (
-                                <img src={friend.avatar} alt="Avatar" className="w-full h-full object-cover" />
+                              {item.avatar ? (
+                                <img src={item.avatar} alt="Avatar" className="w-full h-full object-cover" />
                               ) : (
                                 <User className="w-4 h-4 text-[#ff6b00]" />
                               )}
@@ -1754,13 +1890,23 @@ export default function App() {
                           </div>
 
                           <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-1.5">
-                              <span className="text-[14px] font-medium truncate text-white">
-                                {friend.displayName || friend.username}
-                              </span>
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-1.5 truncate">
+                                <span className="text-[14px] font-medium truncate text-white">
+                                  {item.displayName}
+                                </span>
+                                {item.isSelf && (
+                                  <span className="text-[11px] text-[#80848e] bg-[#232428] px-1 rounded-[3px]">You</span>
+                                )}
+                              </div>
+                              {item.isPinned && (
+                                <span title="Pinned DM">
+                                  <Pin className="w-3.5 h-3.5 text-[#ff6b00] flex-shrink-0" />
+                                </span>
+                              )}
                             </div>
                             <p className="text-[12px] text-[#949ba4] truncate mt-0.5">
-                              @{friend.username}
+                              {item.subtitle}
                             </p>
                           </div>
                         </div>
@@ -1769,7 +1915,7 @@ export default function App() {
 
                     {friends.length === 0 && (
                       <div className="px-2 pt-3 text-[12px] text-[#80848e] leading-relaxed">
-                        Add friends in the <span className="text-[#ff8f3d] font-medium cursor-pointer hover:underline" onClick={() => setDmTab('friends')}>Friends tab</span> to message them directly.
+                        Add friends in the <span className="text-[#ff8f3d] font-medium cursor-pointer hover:underline" onClick={() => setDmTab('friends')}>Friends tab</span> to message them directly. Right-click any DM to pin or clear chat.
                       </div>
                     )}
                   </>
@@ -2103,7 +2249,7 @@ export default function App() {
                       </div>
 
                       {/* Rendered self messages */}
-                      {displayedMessages.map((msg) => (
+                      {displayedSelfMessages.map((msg) => (
                         <ChatMessageItem
                           key={msg.id}
                           msg={msg}
@@ -2351,7 +2497,7 @@ export default function App() {
                     </div>
 
                     {/* Messages in this DM */}
-                    {dmChatMessages.map((msg) => (
+                    {displayedDmMessages.map((msg) => (
                       <ChatMessageItem
                         key={msg.id}
                         msg={msg}
@@ -3865,6 +4011,62 @@ export default function App() {
               Already have an account?
             </button>
           </form>
+        </div>
+      )}
+
+      {/* DM RIGHT-CLICK CONTEXT MENU MODAL */}
+      {dmContextMenu && (
+        <div
+          className="fixed inset-0 z-[100] select-none"
+          onClick={() => setDmContextMenu(null)}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            setDmContextMenu(null);
+          }}
+        >
+          <div
+            style={{
+              left: `${Math.min(dmContextMenu.x, window.innerWidth - 220)}px`,
+              top: `${Math.min(dmContextMenu.y, window.innerHeight - 160)}px`
+            }}
+            className="fixed w-52 bg-[#111214] border border-[#232428] rounded-[8px] shadow-2xl p-1.5 z-[101] animate-in fade-in zoom-in-95 duration-100"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Context Menu Header */}
+            <div className="px-2.5 py-2 border-b border-[#232428] mb-1 flex items-center gap-2.5">
+              <div className="w-7 h-7 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white flex-shrink-0 ring-1 ring-[#232428]">
+                {dmContextMenu.targetAvatar ? (
+                  <img src={dmContextMenu.targetAvatar} alt="PFP" className="w-full h-full object-cover" />
+                ) : (
+                  <User className="w-3.5 h-3.5 text-[#ff6b00]" />
+                )}
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-white text-[13px] font-bold truncate">{dmContextMenu.targetDisplayName}</p>
+                <p className="text-[#949ba4] text-[11px] truncate">@{dmContextMenu.targetDm}</p>
+              </div>
+            </div>
+
+            {/* Pin / Unpin Option */}
+            <button
+              type="button"
+              onClick={() => handleTogglePinDm(dmContextMenu.targetDm)}
+              className="w-full flex items-center gap-2.5 px-2.5 py-2 text-[13px] font-medium text-[#dbdee1] hover:bg-[#ff6b00] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left group"
+            >
+              <Pin className="w-4 h-4 text-[#ff6b00] group-hover:text-white" />
+              <span>{localPinnedDms[dmContextMenu.targetDm.toLowerCase()] ? 'Unpin DM' : 'Pin DM'}</span>
+            </button>
+
+            {/* Clear DM Chat Option */}
+            <button
+              type="button"
+              onClick={() => handleClearDmChat(dmContextMenu.targetDm)}
+              className="w-full flex items-center gap-2.5 px-2.5 py-2 text-[13px] font-medium text-[#f23f43] hover:bg-[#f23f43] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>Clear DM Chat</span>
+            </button>
+          </div>
         </div>
       )}
     </div>
