@@ -1,6 +1,7 @@
-import React from 'react';
-import { User, ZoomIn, Reply, Trash2 } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { User, ZoomIn, Reply, Trash2, Smile } from 'lucide-react';
 import { ChatMessage } from '../lib/database';
+import { EmojiPicker } from './EmojiPicker';
 
 interface ChatMessageItemProps {
   msg: ChatMessage;
@@ -12,8 +13,6 @@ interface ChatMessageItemProps {
   onImageClick: (url: string) => void;
 }
 
-const QUICK_EMOJIS = ['👍', '❤️', '🔥', '😂', '😮', '💀'];
-
 export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
   msg,
   currentUsername,
@@ -22,25 +21,60 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
   onToggleReaction,
   onImageClick
 }) => {
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const pickerRef = useRef<HTMLDivElement>(null);
   const isAuthor = msg.authorUsername.toLowerCase() === currentUsername.toLowerCase();
 
+  // Close emoji picker on click outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (pickerRef.current && !pickerRef.current.contains(e.target as Node)) {
+        setShowEmojiPicker(false);
+      }
+    };
+    if (showEmojiPicker) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showEmojiPicker]);
+
   return (
-    <div className="group relative flex flex-col py-1 px-3 -mx-3 hover:bg-[#18191c]/70 rounded-[4px] transition-colors">
-      {/* Discord-style Curved Inline Reply line */}
+    <div className="group relative flex flex-col py-1.5 px-3 -mx-3 hover:bg-[#18191c]/70 rounded-[4px] transition-colors">
+      {/* Discord-style Curved Inline Reply line with Author Avatar + Name + Snippet */}
       {msg.replyTo && (
-        <div className="flex items-center gap-1.5 text-[12px] text-[#949ba4] ml-6 mb-1 select-none">
-          <div className="w-5 h-2.5 border-l-2 border-t-2 border-[#4e5058] rounded-tl-md -mt-1 ml-1 flex-shrink-0" />
-          <span className="font-semibold text-white/90 truncate max-w-[150px]">
+        <div className="flex items-center gap-2 text-[12px] text-[#949ba4] ml-5 mb-1 select-none">
+          {/* Curved line connection */}
+          <div className="w-6 h-3 border-l-2 border-t-2 border-[#4e5058] rounded-tl-md -mt-1 ml-1 flex-shrink-0" />
+
+          {/* Mini Author Avatar in quoted line */}
+          <div className="w-4 h-4 rounded-full bg-[#2b2d31] overflow-hidden flex items-center justify-center flex-shrink-0">
+            {msg.replyTo.authorAvatar ? (
+              <img src={msg.replyTo.authorAvatar} alt="" className="w-full h-full object-cover" />
+            ) : (
+              <User className="w-2.5 h-2.5 text-[#ff6b00]" />
+            )}
+          </div>
+
+          {/* Quoted author name */}
+          <span className="font-semibold text-white/90 hover:underline cursor-pointer truncate max-w-[140px]">
             @{msg.replyTo.authorDisplayName || msg.replyTo.authorUsername}
           </span>
-          <span className="text-[#949ba4] truncate max-w-sm text-[12px]">
-            {msg.replyTo.text ? msg.replyTo.text : msg.replyTo.imageUrl ? '📷 [Image attachment]' : '...'}
+
+          {/* Quoted text preview */}
+          <span className="text-[#949ba4] truncate max-w-md text-[12px]">
+            {msg.replyTo.text ? (
+              msg.replyTo.text
+            ) : msg.replyTo.imageUrl ? (
+              '📷 [Image attachment]'
+            ) : (
+              '...'
+            )}
           </span>
         </div>
       )}
 
       {/* Main message row */}
-      <div className="flex gap-4 min-w-0">
+      <div className="flex gap-3.5 min-w-0">
         {/* Author Avatar */}
         <div className="w-10 h-10 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white flex-shrink-0 mt-0.5 ring-2 ring-[#232428]">
           {msg.authorAvatar ? (
@@ -116,22 +150,21 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
         </div>
       </div>
 
-      {/* Floating Hover Action Bar */}
-      <div className="opacity-0 group-hover:opacity-100 absolute -top-3.5 right-4 bg-[#2b2d31] border border-[#35373c] rounded-[4px] shadow-lg flex items-center px-1.5 py-0.5 gap-0.5 z-10 transition-opacity">
-        {/* Quick Reactions */}
-        {QUICK_EMOJIS.map((emoji) => (
-          <button
-            key={emoji}
-            type="button"
-            onClick={() => onToggleReaction(msg, emoji)}
-            className="hover:bg-[#35373c] p-1 rounded-[3px] text-[13px] transition-transform hover:scale-125 cursor-pointer"
-            title={`React with ${emoji}`}
-          >
-            {emoji}
-          </button>
-        ))}
+      {/* Floating Hover Action Bar without preset reactions */}
+      <div className="opacity-0 group-hover:opacity-100 absolute -top-3.5 right-4 bg-[#2b2d31] border border-[#35373c] rounded-[4px] shadow-lg flex items-center px-1.5 py-1 gap-1 z-20 transition-opacity">
+        {/* Full Emoji Picker Trigger Button */}
+        <button
+          type="button"
+          onClick={() => setShowEmojiPicker(!showEmojiPicker)}
+          className={`p-1 hover:bg-[#35373c] rounded-[3px] transition-colors cursor-pointer ${
+            showEmojiPicker ? 'text-[#ff6b00] bg-[#35373c]' : 'text-[#949ba4] hover:text-white'
+          }`}
+          title="Add Reaction"
+        >
+          <Smile className="w-4 h-4" />
+        </button>
 
-        <div className="w-[1px] h-3.5 bg-[#3b3e45] mx-1" />
+        <div className="w-[1px] h-3.5 bg-[#3b3e45] mx-0.5" />
 
         {/* Reply button */}
         <button
@@ -155,6 +188,19 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
           </button>
         )}
       </div>
+
+      {/* Popover Emoji Picker */}
+      {showEmojiPicker && (
+        <div ref={pickerRef} className="absolute right-4 top-6 z-50 shadow-2xl">
+          <EmojiPicker
+            onSelectEmoji={(emoji) => {
+              onToggleReaction(msg, emoji);
+              setShowEmojiPicker(false);
+            }}
+            onClose={() => setShowEmojiPicker(false)}
+          />
+        </div>
+      )}
     </div>
   );
 };

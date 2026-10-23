@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
-import { Users, UserPlus, Search, MessageSquare, Trash2, Check, AlertCircle, Loader2, User } from 'lucide-react';
+import { Users, UserPlus, Search, MessageSquare, Trash2, Check, AlertCircle, Loader2, User, X, Clock } from 'lucide-react';
 import { FriendItem } from '../lib/database';
 
 interface FriendsViewProps {
   friends: FriendItem[];
-  filterTab: 'online' | 'all' | 'add';
-  onFilterTabChange: (tab: 'online' | 'all' | 'add') => void;
+  filterTab: 'online' | 'all' | 'pending' | 'add';
+  onFilterTabChange: (tab: 'online' | 'all' | 'pending' | 'add') => void;
   addFriendInput: string;
   onAddFriendInputChange: (val: string) => void;
   onAddFriendSubmit: (e: React.FormEvent) => void;
@@ -13,6 +13,8 @@ interface FriendsViewProps {
   isAddingFriend: boolean;
   onOpenDm: (friendUsername: string) => void;
   onRemoveFriend: (friendUsername: string) => void;
+  onAcceptFriendRequest: (friendUsername: string) => void;
+  onDeclineFriendRequest: (friendUsername: string) => void;
   statusConfig: Record<string, { label: string; color: string; bgClass: string }>;
 }
 
@@ -27,13 +29,26 @@ export const FriendsView: React.FC<FriendsViewProps> = ({
   isAddingFriend,
   onOpenDm,
   onRemoveFriend,
+  onAcceptFriendRequest,
+  onDeclineFriendRequest,
   statusConfig
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
 
-  const onlineFriends = friends.filter((f) => f.status && f.status !== 'offline');
+  const acceptedFriends = friends.filter((f) => !f.requestStatus || f.requestStatus === 'accepted');
+  const onlineFriends = acceptedFriends.filter((f) => f.status && f.status !== 'offline');
+  const pendingRequests = friends.filter(
+    (f) => f.requestStatus === 'pending_incoming' || f.requestStatus === 'pending_outgoing'
+  );
+  const incomingCount = friends.filter((f) => f.requestStatus === 'pending_incoming').length;
 
-  const displayedFriends = (filterTab === 'online' ? onlineFriends : friends).filter((f) => {
+  const displayedFriends = (
+    filterTab === 'online'
+      ? onlineFriends
+      : filterTab === 'all'
+      ? acceptedFriends
+      : pendingRequests
+  ).filter((f) => {
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     return (
@@ -77,7 +92,22 @@ export const FriendsView: React.FC<FriendsViewProps> = ({
                   : 'text-[#949ba4] hover:text-[#dbdee1] hover:bg-[#232428]'
               }`}
             >
-              All ({friends.length})
+              All ({acceptedFriends.length})
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onFilterTabChange('pending')}
+              className={`px-3 py-1 rounded-[4px] text-[14px] font-semibold transition-colors cursor-pointer relative flex items-center gap-1.5 ${
+                filterTab === 'pending'
+                  ? 'bg-[#2b2d31] text-white shadow-xs'
+                  : 'text-[#949ba4] hover:text-[#dbdee1] hover:bg-[#232428]'
+              }`}
+            >
+              <span>Pending ({pendingRequests.length})</span>
+              {incomingCount > 0 && (
+                <span className="w-2 h-2 rounded-full bg-[#ff6b00] animate-pulse" />
+              )}
             </button>
 
             <button
@@ -105,7 +135,7 @@ export const FriendsView: React.FC<FriendsViewProps> = ({
               Add Friend
             </h2>
             <p className="text-[#949ba4] text-[14px] mb-6">
-              You can add friends with their Yapzo handle or email address.
+              You can send a friend request with their Yapzo handle or email address. They will need to accept it!
             </p>
 
             <form
@@ -127,7 +157,7 @@ export const FriendsView: React.FC<FriendsViewProps> = ({
                 className="px-4 py-1.5 bg-[#ff6b00] hover:bg-[#e55b00] disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium text-[14px] rounded-[4px] transition-colors cursor-pointer flex items-center gap-1.5 shadow-sm"
               >
                 {isAddingFriend && <Loader2 className="w-4 h-4 animate-spin" />}
-                <span>{isAddingFriend ? 'Adding...' : 'Send Friend Request'}</span>
+                <span>{isAddingFriend ? 'Sending...' : 'Send Friend Request'}</span>
               </button>
             </form>
 
@@ -158,12 +188,12 @@ export const FriendsView: React.FC<FriendsViewProps> = ({
                 Yapzo is better with friends!
               </h3>
               <p className="text-[#949ba4] text-[13px] max-w-sm">
-                Connect with your friends to chat in direct messages, share images and GIFs, and hang out together.
+                Connect with your friends to chat in direct messages, share images and animated GIFs, and hang out together.
               </p>
             </div>
           </div>
         ) : (
-          /* ONLINE / ALL FRIENDS LIST */
+          /* ONLINE / ALL / PENDING FRIENDS LIST */
           <div className="max-w-4xl mx-auto">
             {/* Search filter bar */}
             <div className="relative mb-5">
@@ -179,7 +209,11 @@ export const FriendsView: React.FC<FriendsViewProps> = ({
 
             {/* List count header */}
             <div className="text-[12px] font-bold text-[#b5bac1] uppercase tracking-wider mb-3">
-              {filterTab === 'online' ? `Online — ${displayedFriends.length}` : `All Friends — ${displayedFriends.length}`}
+              {filterTab === 'online'
+                ? `Online — ${displayedFriends.length}`
+                : filterTab === 'all'
+                ? `All Friends — ${displayedFriends.length}`
+                : `Pending Requests — ${displayedFriends.length}`}
             </div>
 
             {/* Friends rows */}
@@ -187,6 +221,9 @@ export const FriendsView: React.FC<FriendsViewProps> = ({
               <div className="space-y-1">
                 {displayedFriends.map((friend) => {
                   const statusInfo = statusConfig[friend.status || 'offline'] || statusConfig.offline;
+                  const isIncoming = friend.requestStatus === 'pending_incoming';
+                  const isOutgoing = friend.requestStatus === 'pending_outgoing';
+
                   return (
                     <div
                       key={friend.id}
@@ -218,31 +255,75 @@ export const FriendsView: React.FC<FriendsViewProps> = ({
                               @{friend.username}
                             </span>
                           </div>
-                          <span className="text-[12px] text-[#80848e] truncate">
-                            {statusInfo.label}
+                          <span className="text-[12px] text-[#80848e] truncate flex items-center gap-1">
+                            {isIncoming ? (
+                              <span className="text-[#ff6b00] font-medium">Incoming Friend Request</span>
+                            ) : isOutgoing ? (
+                              <span className="text-[#949ba4] flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-[#ff6b00]" /> Outgoing Friend Request
+                              </span>
+                            ) : (
+                              statusInfo.label
+                            )}
                           </span>
                         </div>
                       </div>
 
                       {/* Action buttons */}
                       <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={() => onOpenDm(friend.username)}
-                          className="w-9 h-9 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#b5bac1] hover:text-white flex items-center justify-center transition-colors cursor-pointer"
-                          title={`Message @${friend.displayName || friend.username}`}
-                        >
-                          <MessageSquare className="w-4 h-4 text-[#ff6b00]" />
-                        </button>
+                        {isIncoming ? (
+                          <>
+                            {/* Accept Friend Request */}
+                            <button
+                              type="button"
+                              onClick={() => onAcceptFriendRequest(friend.username)}
+                              className="w-9 h-9 rounded-full bg-[#23a55a]/20 hover:bg-[#23a55a] text-[#2ecc71] hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                              title="Accept Friend Request"
+                            >
+                              <Check className="w-5 h-5" />
+                            </button>
 
-                        <button
-                          type="button"
-                          onClick={() => onRemoveFriend(friend.username)}
-                          className="w-9 h-9 rounded-full bg-[#2b2d31] hover:bg-[#f23f43]/20 hover:text-[#f23f43] text-[#b5bac1] flex items-center justify-center transition-colors cursor-pointer"
-                          title="Remove Friend"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                            {/* Decline Friend Request */}
+                            <button
+                              type="button"
+                              onClick={() => onDeclineFriendRequest(friend.username)}
+                              className="w-9 h-9 rounded-full bg-[#2b2d31] hover:bg-[#f23f43]/20 hover:text-[#f23f43] text-[#b5bac1] flex items-center justify-center transition-colors cursor-pointer"
+                              title="Decline Friend Request"
+                            >
+                              <X className="w-5 h-5" />
+                            </button>
+                          </>
+                        ) : isOutgoing ? (
+                          /* Cancel Outgoing Request */
+                          <button
+                            type="button"
+                            onClick={() => onDeclineFriendRequest(friend.username)}
+                            className="w-9 h-9 rounded-full bg-[#2b2d31] hover:bg-[#f23f43]/20 hover:text-[#f23f43] text-[#b5bac1] flex items-center justify-center transition-colors cursor-pointer"
+                            title="Cancel Request"
+                          >
+                            <X className="w-5 h-5" />
+                          </button>
+                        ) : (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => onOpenDm(friend.username)}
+                              className="w-9 h-9 rounded-full bg-[#2b2d31] hover:bg-[#35373c] text-[#b5bac1] hover:text-white flex items-center justify-center transition-colors cursor-pointer"
+                              title={`Message @${friend.displayName || friend.username}`}
+                            >
+                              <MessageSquare className="w-4 h-4 text-[#ff6b00]" />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => onRemoveFriend(friend.username)}
+                              className="w-9 h-9 rounded-full bg-[#2b2d31] hover:bg-[#f23f43]/20 hover:text-[#f23f43] text-[#b5bac1] flex items-center justify-center transition-colors cursor-pointer"
+                              title="Remove Friend"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
                       </div>
                     </div>
                   );
@@ -255,7 +336,11 @@ export const FriendsView: React.FC<FriendsViewProps> = ({
                   <Users className="w-10 h-10" />
                 </div>
                 <h3 className="text-white font-semibold text-[16px] mb-1">
-                  {filterTab === 'online' ? 'No friends are online right now.' : 'No friends found.'}
+                  {filterTab === 'online'
+                    ? 'No friends are online right now.'
+                    : filterTab === 'pending'
+                    ? 'No pending friend requests.'
+                    : 'No friends found.'}
                 </h3>
                 <p className="text-[#949ba4] text-[13px] max-w-sm mb-4">
                   Add some friends with their Yapzo handle or email to start chatting and hanging out!

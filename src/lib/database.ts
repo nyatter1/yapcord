@@ -40,16 +40,17 @@ export interface UserProfile {
 export interface MessageReplyInfo {
   id: string;
   text?: string;
-  imageUrl?: string;
+  imageUrl?: string | null;
   authorDisplayName: string;
   authorUsername: string;
+  authorAvatar?: string | null;
 }
 
 export interface ChatMessage {
   id: string;
   channelId?: string;
   text: string;
-  imageUrl?: string;
+  imageUrl?: string | null;
   authorId: string;
   authorUsername: string;
   authorDisplayName: string;
@@ -68,6 +69,28 @@ export interface FriendItem {
   status?: UserStatus;
   aboutMe?: string;
   addedAt: number;
+  requestStatus?: 'accepted' | 'pending_incoming' | 'pending_outgoing';
+}
+
+/**
+ * Recursively removes undefined values from an object/array so Firebase Realtime Database
+ * operations never throw "value argument contains undefined".
+ */
+export function cleanUndefined<T>(obj: T): T {
+  if (obj === null || obj === undefined || typeof obj !== 'object') {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map((item) => cleanUndefined(item)) as unknown as T;
+  }
+  const cleaned: Record<string, any> = {};
+  for (const key of Object.keys(obj)) {
+    const val = (obj as any)[key];
+    if (val !== undefined) {
+      cleaned[key] = cleanUndefined(val);
+    }
+  }
+  return cleaned as T;
 }
 
 /**
@@ -161,7 +184,7 @@ export async function saveUserProfile(profile: UserProfile): Promise<void> {
   updates[`users/${userKey}`] = { ...profile, id: userKey };
   updates[`emails/${emailKey}`] = userKey;
 
-  await update(ref(rtdb), updates);
+  await update(ref(rtdb), cleanUndefined(updates));
 }
 
 /**
@@ -171,10 +194,13 @@ export async function updateUserProfile(userId: string, partial: Partial<UserPro
   try {
     const userKey = normalizeKey(userId);
     const userRef = ref(rtdb, `users/${userKey}`);
-    await update(userRef, {
-      ...partial,
-      lastSeen: Date.now()
-    });
+    await update(
+      userRef,
+      cleanUndefined({
+        ...partial,
+        lastSeen: Date.now()
+      })
+    );
   } catch (err) {
     console.error('Error updating user in Realtime Database:', err);
   }
@@ -248,7 +274,7 @@ export async function sendChannelMessage(
   const channelKey = normalizeKey(channelId);
   const messagesRef = ref(rtdb, `channels/${channelKey}/messages`);
   const newMsgRef = push(messagesRef);
-  await set(newMsgRef, message);
+  await set(newMsgRef, cleanUndefined(message));
   return newMsgRef.key || `${Date.now()}`;
 }
 
@@ -296,7 +322,7 @@ export async function sendSelfMessage(
   const userKey = normalizeKey(userId);
   const selfNotesRef = ref(rtdb, `self_notes/${userKey}`);
   const newNoteRef = push(selfNotesRef);
-  await set(newNoteRef, message);
+  await set(newNoteRef, cleanUndefined(message));
   return newNoteRef.key || `${Date.now()}`;
 }
 
@@ -373,7 +399,7 @@ export async function sendDmMessage(
   const dmChatId = getDmChatId(userA, userB);
   const messagesRef = ref(rtdb, `direct_messages/${dmChatId}/messages`);
   const newMsgRef = push(messagesRef);
-  await set(newMsgRef, message);
+  await set(newMsgRef, cleanUndefined(message));
   return newMsgRef.key || `${Date.now()}`;
 }
 
@@ -444,11 +470,11 @@ export async function toggleMessageReaction(
     reactions[emoji] = [...currentUsers, cleanUser];
   }
 
-  await set(reactionsRef, reactions);
+  await set(reactionsRef, cleanUndefined(reactions));
 }
 
 /**
- * Adds a friend by target handle or email.
+ * Adds a friend request by target handle or email.
  */
 export async function addFriend(
   myProfile: UserProfile,
@@ -458,7 +484,7 @@ export async function addFriend(
   const myClean = normalizeKey(myProfile.username);
 
   if (cleanTarget === myClean || cleanTarget === myProfile.email?.toLowerCase()) {
-    return { success: false, error: "You cannot add yourself as a friend!" };
+    return { success: false, error: 'You cannot add yourself as a friend!' };
   }
 
   const targetUser = await findUserByHandleOrEmail(cleanTarget);
@@ -468,7 +494,7 @@ export async function addFriend(
 
   const targetClean = normalizeKey(targetUser.username);
   if (targetClean === myClean) {
-    return { success: false, error: "You cannot add yourself as a friend!" };
+    return { success: false, error: 'You cannot add yourself as a friend!' };
   }
 
   const myFriendEntry: FriendItem = {
@@ -478,7 +504,8 @@ export async function addFriend(
     avatar: targetUser.avatar || null,
     status: targetUser.status || 'offline',
     aboutMe: targetUser.aboutMe || '',
-    addedAt: Date.now()
+    addedAt: Date.now(),
+    requestStatus: 'pending_outgoing'
   };
 
   const theirFriendEntry: FriendItem = {
@@ -488,16 +515,38 @@ export async function addFriend(
     avatar: myProfile.avatar || null,
     status: myProfile.status || 'online',
     aboutMe: myProfile.aboutMe || '',
-    addedAt: Date.now()
+    addedAt: Date.now(),
+    requestStatus: 'pending_incoming'
   };
 
   const updates: Record<string, any> = {};
   updates[`friends/${myClean}/${targetClean}`] = myFriendEntry;
   updates[`friends/${targetClean}/${myClean}`] = theirFriendEntry;
 
-  await update(ref(rtdb), updates);
+  await update(ref(rtdb), cleanUndefined(updates));
 
   return { success: true, friend: myFriendEntry };
+}
+
+/**
+ * Accepts a pending friend request.
+ */
+export async function acceptFriendRequest(myUsername: string, targetUsername: string): Promise<void> {
+  const myClean = normalizeKey(myUsername);
+  const targetClean = normalizeKey(targetUsername);
+
+  const updates: Record<string, any> = {};
+  updates[`friends/${myClean}/${targetClean}/requestStatus`] = 'accepted';
+  updates[`friends/${targetClean}/${myClean}/requestStatus`] = 'accepted';
+
+  await update(ref(rtdb), updates);
+}
+
+/**
+ * Declines or cancels a friend request.
+ */
+export async function declineFriendRequest(myUsername: string, targetUsername: string): Promise<void> {
+  await removeFriend(myUsername, targetUsername);
 }
 
 /**
@@ -532,7 +581,11 @@ export function subscribeToFriends(
         const val = snapshot.val();
         Object.keys(val).forEach((k) => {
           if (val[k]) {
-            list.push({ ...val[k], id: k });
+            list.push({
+              ...val[k],
+              id: k,
+              requestStatus: val[k].requestStatus || 'accepted'
+            });
           }
         });
         list.sort((a, b) => b.addedAt - a.addedAt);

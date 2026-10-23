@@ -57,10 +57,13 @@ import {
   toggleMessageReaction,
   addFriend,
   removeFriend,
+  acceptFriendRequest,
+  declineFriendRequest,
   subscribeToFriends
 } from './lib/database';
 import { ChatMessageItem } from './components/ChatMessageItem';
 import { FriendsView } from './components/FriendsView';
+import { EmojiPicker } from './components/EmojiPicker';
 
 type Screen = 'auth' | 'step1' | 'step2' | 'loading' | 'app';
 type AuthMode = 'login' | 'register';
@@ -308,7 +311,7 @@ function ImageCropModal({ imageSrc, isAvatar, onCancel, onApply, isUploading }: 
             className="h-9 px-6 bg-[#ff6b00] hover:bg-[#e55b00] active:bg-[#cc4e00] disabled:opacity-60 disabled:cursor-not-allowed text-white font-medium text-[14px] rounded-[3px] transition-colors cursor-pointer flex items-center gap-2"
           >
             {isUploading && <Loader2 className="w-4 h-4 animate-spin" />}
-            {isUploading ? 'Uploading to Cloudinary...' : 'Apply'}
+            {isUploading ? 'Uploading image...' : 'Apply'}
           </button>
         </div>
       </div>
@@ -407,7 +410,7 @@ export default function App() {
 
   // DMs / Friends header tab and sort filter state
   const [dmTab, setDmTab] = useState<'dms' | 'friends'>(initialSession?.dmTab || 'dms');
-  const [friendsFilterTab, setFriendsFilterTab] = useState<'online' | 'all' | 'add'>('online');
+  const [friendsFilterTab, setFriendsFilterTab] = useState<'online' | 'all' | 'pending' | 'add'>('online');
   const [friends, setFriends] = useState<FriendItem[]>([]);
   const [addFriendInput, setAddFriendInput] = useState('');
   const [addFriendStatus, setAddFriendStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
@@ -436,6 +439,8 @@ export default function App() {
   const [channelAttachment, setChannelAttachment] = useState<{ file: File; previewUrl: string; name: string } | null>(null);
   const [dmAttachment, setDmAttachment] = useState<{ file: File; previewUrl: string; name: string } | null>(null);
   const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [showChannelEmojiPicker, setShowChannelEmojiPicker] = useState(false);
+  const [showDmEmojiPicker, setShowDmEmojiPicker] = useState(false);
   const channelFileInputRef = useRef<HTMLInputElement>(null);
   const dmFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -1034,20 +1039,50 @@ export default function App() {
     }
   };
 
-  // Upload handler triggering the Crop/Resize modal
-  const handleSelectImageForCrop = (e: React.ChangeEvent<HTMLInputElement>, isAvatar: boolean) => {
+  // Upload handler triggering the Crop/Resize modal (or direct upload for animated GIFs)
+  const handleSelectImageForCrop = async (e: React.ChangeEvent<HTMLInputElement>, isAvatar: boolean) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        setCropModal({
-          isOpen: true,
-          imageSrc: dataUrl,
-          isAvatar
-        });
-      };
-      reader.readAsDataURL(file);
+      if (file.type === 'image/gif' || file.name.toLowerCase().endsWith('.gif')) {
+        setIsUploadingImage(true);
+        try {
+          const gifUrl = await uploadToCloudinary(file);
+          if (isAvatar) {
+            if (isSettingsOpen) setDraftAvatar(gifUrl);
+            else setAvatarPreview(gifUrl);
+          } else {
+            if (isSettingsOpen) setDraftBanner(gifUrl);
+            else setBannerPreview(gifUrl);
+          }
+        } catch (err) {
+          console.error('Error uploading GIF PFP/Banner:', err);
+          const reader = new FileReader();
+          reader.onload = () => {
+            const dataUrl = reader.result as string;
+            if (isAvatar) {
+              if (isSettingsOpen) setDraftAvatar(dataUrl);
+              else setAvatarPreview(dataUrl);
+            } else {
+              if (isSettingsOpen) setDraftBanner(dataUrl);
+              else setBannerPreview(dataUrl);
+            }
+          };
+          reader.readAsDataURL(file);
+        } finally {
+          setIsUploadingImage(false);
+        }
+      } else {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const dataUrl = reader.result as string;
+          setCropModal({
+            isOpen: true,
+            imageSrc: dataUrl,
+            isAvatar
+          });
+        };
+        reader.readAsDataURL(file);
+      }
     }
     e.target.value = '';
   };
@@ -1185,19 +1220,20 @@ export default function App() {
 
     const currentMsg: Omit<ChatMessage, 'id'> = {
       text,
-      imageUrl: uploadedImageUrl,
+      imageUrl: uploadedImageUrl || null,
       authorId: currentUsername,
       authorUsername: currentUsername,
       authorDisplayName: currentDisplayName,
-      authorAvatar: avatarPreview,
+      authorAvatar: avatarPreview || null,
       timestamp: formatDiscordTimestamp(),
       createdAt: Date.now(),
       replyTo: replyTarget && (replyTarget.location === 'dm' || replyTarget.location === 'self') ? {
         id: replyTarget.message.id,
-        text: replyTarget.message.text,
-        imageUrl: replyTarget.message.imageUrl,
+        text: replyTarget.message.text || '',
+        imageUrl: replyTarget.message.imageUrl || null,
         authorDisplayName: replyTarget.message.authorDisplayName,
-        authorUsername: replyTarget.message.authorUsername
+        authorUsername: replyTarget.message.authorUsername,
+        authorAvatar: replyTarget.message.authorAvatar || null
       } : null
     };
 
@@ -1238,19 +1274,20 @@ export default function App() {
     const currentMsg: Omit<ChatMessage, 'id'> = {
       channelId: activeChannelId,
       text,
-      imageUrl: uploadedImageUrl,
+      imageUrl: uploadedImageUrl || null,
       authorId: currentUsername,
       authorUsername: currentUsername,
       authorDisplayName: currentDisplayName,
-      authorAvatar: avatarPreview,
+      authorAvatar: avatarPreview || null,
       timestamp: formatDiscordTimestamp(),
       createdAt: Date.now(),
       replyTo: replyTarget && replyTarget.location === 'channel' ? {
         id: replyTarget.message.id,
-        text: replyTarget.message.text,
-        imageUrl: replyTarget.message.imageUrl,
+        text: replyTarget.message.text || '',
+        imageUrl: replyTarget.message.imageUrl || null,
         authorDisplayName: replyTarget.message.authorDisplayName,
-        authorUsername: replyTarget.message.authorUsername
+        authorUsername: replyTarget.message.authorUsername,
+        authorAvatar: replyTarget.message.authorAvatar || null
       } : null
     };
 
@@ -1353,6 +1390,27 @@ export default function App() {
       }
     } catch (err) {
       console.error('Error removing friend:', err);
+    }
+  };
+
+  // Accept friend request handler
+  const handleAcceptFriendRequestAction = async (friendUsername: string) => {
+    try {
+      await acceptFriendRequest(currentUsername, friendUsername);
+    } catch (err) {
+      console.error('Error accepting friend request:', err);
+    }
+  };
+
+  // Decline/Cancel friend request handler
+  const handleDeclineFriendRequestAction = async (friendUsername: string) => {
+    try {
+      await declineFriendRequest(currentUsername, friendUsername);
+      if (selectedDm.toLowerCase() === friendUsername.toLowerCase()) {
+        setSelectedDm('self');
+      }
+    } catch (err) {
+      console.error('Error declining friend request:', err);
     }
   };
 
@@ -1983,6 +2041,8 @@ export default function App() {
                   setSelectedDm(friendUser);
                 }}
                 onRemoveFriend={handleRemoveFriendAction}
+                onAcceptFriendRequest={handleAcceptFriendRequestAction}
+                onDeclineFriendRequest={handleDeclineFriendRequestAction}
                 statusConfig={STATUS_CONFIG}
               />
             ) : selectedDm === 'self' ? (
@@ -3032,16 +3092,7 @@ export default function App() {
               className="relative max-w-5xl max-h-[92vh] flex flex-col items-center"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="w-full flex items-center justify-between py-2 text-white/80">
-                <a
-                  href={previewImageUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-[13px] text-[#ff8f3d] hover:underline flex items-center gap-1.5 font-medium"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                  <span>Open original in new tab</span>
-                </a>
+              <div className="w-full flex items-center justify-end py-2 text-white/80">
                 <button
                   type="button"
                   onClick={() => setPreviewImageUrl(null)}
