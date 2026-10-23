@@ -24,12 +24,29 @@ import {
   Send,
   Smile,
   Hash,
-  Users
+  Users,
+  Loader2
 } from 'lucide-react';
+import { uploadToCloudinary } from './lib/cloudinary';
+import {
+  UserProfile,
+  ChatMessage,
+  UserStatus,
+  checkHandleOrEmailExists,
+  findUserByHandleOrEmail,
+  saveUserProfile,
+  updateUserProfile,
+  subscribeToAllUsers,
+  subscribeToChannelMessages,
+  sendChannelMessage,
+  subscribeToSelfMessages,
+  sendSelfMessage,
+  deleteSelfMessage,
+  deleteChannelMessage
+} from './lib/database';
 
 type Screen = 'auth' | 'step1' | 'step2' | 'loading' | 'app';
 type AuthMode = 'login' | 'register';
-type UserStatus = 'online' | 'idle' | 'dnd' | 'offline';
 
 const STATUS_CONFIG: Record<UserStatus, { label: string; color: string; bgClass: string }> = {
   online: { label: 'Online', color: '#23a55a', bgClass: 'bg-[#23a55a]' },
@@ -38,13 +55,6 @@ const STATUS_CONFIG: Record<UserStatus, { label: string; color: string; bgClass:
   offline: { label: 'Invisible', color: '#80848e', bgClass: 'bg-[#80848e]' }
 };
 
-interface ChatMessage {
-  id: string;
-  text: string;
-  timestamp: string;
-  createdAt: number;
-}
-
 interface ServerChannel {
   id: string;
   name: string;
@@ -52,10 +62,10 @@ interface ServerChannel {
   category: string;
 }
 
-const YAPCORD_HQ_CHANNELS: ServerChannel[] = [
-  { id: 'welcome', name: 'welcome', description: 'Welcome to Yapcord HQ! Say hello here.', category: 'Information' },
-  { id: 'announcements', name: 'announcements', description: 'Official announcements and updates from Yapcord.', category: 'Information' },
-  { id: 'rules', name: 'rules', description: 'Server guidelines and rules for Yapcord HQ.', category: 'Information' },
+const YAPZO_HQ_CHANNELS: ServerChannel[] = [
+  { id: 'welcome', name: 'welcome', description: 'Welcome to Yapzo HQ! Say hello here.', category: 'Information' },
+  { id: 'announcements', name: 'announcements', description: 'Official announcements and updates from Yapzo.', category: 'Information' },
+  { id: 'rules', name: 'rules', description: 'Server guidelines and rules for Yapzo HQ.', category: 'Information' },
   { id: 'general', name: 'general', description: 'General discussion for all yappers.', category: 'Text Channels' },
   { id: 'yap-session', name: 'yap-session', description: 'Unlimited yapping, deep talks, and thoughts.', category: 'Text Channels' },
   { id: 'media', name: 'media', description: 'Share your clips, screenshots, memes, and artwork.', category: 'Text Channels' },
@@ -83,7 +93,7 @@ interface StoredSession {
   channelMessages?: Record<string, ChatMessage[]>;
 }
 
-const STORAGE_KEY = 'yapcord_user_session';
+const STORAGE_KEY = 'yapzo_user_session';
 
 const getStoredSession = (): StoredSession | null => {
   try {
@@ -109,7 +119,7 @@ const DISCORD_TIPS = [
   'Holding Shift while clicking the delete button bypasses the delete confirmation.',
   'You can mute a server or channel by right-clicking its icon.',
   'You can drag and drop servers on top of each other to organize them into folders.',
-  'Yapcord was founded on long conversations that lasted until 4 AM.',
+  'Yapzo was founded on long conversations that lasted until 4 AM.',
   'Pressing Esc will mark all unread messages in the active channel as read.',
   'You can press Ctrl + / to see all keyboard shortcuts at any time.',
   'Typing /tableflip puts (╯°□°)╯︵ ┻━┻ into your message.',
@@ -123,10 +133,11 @@ interface ImageCropModalProps {
   imageSrc: string;
   isAvatar: boolean;
   onCancel: () => void;
-  onApply: (dataUrl: string) => void;
+  onApply: (dataUrl: string) => Promise<void> | void;
+  isUploading?: boolean;
 }
 
-function ImageCropModal({ imageSrc, isAvatar, onCancel, onApply }: ImageCropModalProps) {
+function ImageCropModal({ imageSrc, isAvatar, onCancel, onApply, isUploading }: ImageCropModalProps) {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [isDragging, setIsDragging] = useState(false);
@@ -275,10 +286,12 @@ function ImageCropModal({ imageSrc, isAvatar, onCancel, onApply }: ImageCropModa
           </button>
           <button
             type="button"
+            disabled={isUploading}
             onClick={handleConfirm}
-            className="h-9 px-6 bg-[#ff6b00] hover:bg-[#e55b00] active:bg-[#cc4e00] text-white font-medium text-[14px] rounded-[3px] transition-colors cursor-pointer"
+            className="h-9 px-6 bg-[#ff6b00] hover:bg-[#e55b00] active:bg-[#cc4e00] disabled:opacity-60 disabled:cursor-not-allowed text-white font-medium text-[14px] rounded-[3px] transition-colors cursor-pointer flex items-center gap-2"
           >
-            Apply
+            {isUploading && <Loader2 className="w-4 h-4 animate-spin" />}
+            {isUploading ? 'Uploading to Cloudinary...' : 'Apply'}
           </button>
         </div>
       </div>
@@ -334,6 +347,14 @@ export default function App() {
   const [draftAvatar, setDraftAvatar] = useState<string | null>(initialSession?.avatar || null);
   const [draftBanner, setDraftBanner] = useState<string | null>(initialSession?.banner || null);
 
+  // Firestore & Cloudinary async states
+  const [isCheckingAccount, setIsCheckingAccount] = useState(false);
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
+  const [isSavingSettings, setIsSavingSettings] = useState(false);
+  const [allUsers, setAllUsers] = useState<UserProfile[]>([]);
+
   // Image crop modal state
   const [cropModal, setCropModal] = useState<{
     isOpen: boolean;
@@ -346,9 +367,9 @@ export default function App() {
   const [agreeGuidelines, setAgreeGuidelines] = useState(false);
   const [agreeRules, setAgreeRules] = useState(false);
 
-  // App Layout State (Everyone automatically joins Yapcord HQ)
+  // App Layout State (Everyone automatically joins Yapzo HQ)
   const [activeServerId, setActiveServerId] = useState<string | null>(
-    initialSession ? (initialSession.activeServerId ?? 'yapcord-hq') : 'yapcord-hq'
+    initialSession ? (initialSession.activeServerId ?? 'yapzo-hq') : 'yapzo-hq'
   );
   const [isHomeSelected, setIsHomeSelected] = useState<boolean>(
     initialSession ? initialSession.activeServerId === null : false
@@ -398,6 +419,39 @@ export default function App() {
   const serverMenuRef = useRef<HTMLDivElement>(null);
   const userSettingsRef = useRef<HTMLDivElement>(null);
 
+  // Crop apply handler with Cloudinary upload
+  const handleCropApply = async (resultDataUrl: string) => {
+    setIsUploadingImage(true);
+    try {
+      const cloudinaryUrl = await uploadToCloudinary(resultDataUrl);
+      if (cropModal?.isAvatar) {
+        if (isSettingsOpen) {
+          setDraftAvatar(cloudinaryUrl);
+        } else {
+          setAvatarPreview(cloudinaryUrl);
+        }
+      } else {
+        if (isSettingsOpen) {
+          setDraftBanner(cloudinaryUrl);
+        } else {
+          setBannerPreview(cloudinaryUrl);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to upload image to Cloudinary, falling back:', err);
+      if (cropModal?.isAvatar) {
+        if (isSettingsOpen) setDraftAvatar(resultDataUrl);
+        else setAvatarPreview(resultDataUrl);
+      } else {
+        if (isSettingsOpen) setDraftBanner(resultDataUrl);
+        else setBannerPreview(resultDataUrl);
+      }
+    } finally {
+      setIsUploadingImage(false);
+      setCropModal(null);
+    }
+  };
+
   // Settings handlers & draft management
   const openSettings = () => {
     setDraftDisplayName(regDisplayName);
@@ -426,12 +480,69 @@ export default function App() {
     setDraftBanner(bannerPreview);
   };
 
-  const handleSaveSettings = () => {
-    setRegDisplayName(draftDisplayName);
-    setPronouns(draftPronouns);
-    setAboutMe(draftAboutMe);
-    setAvatarPreview(draftAvatar);
-    setBannerPreview(draftBanner);
+  const handleSaveSettings = async () => {
+    setIsSavingSettings(true);
+    try {
+      let finalAvatar = draftAvatar;
+      let finalBanner = draftBanner;
+      if (draftAvatar && draftAvatar.startsWith('data:')) {
+        finalAvatar = await uploadToCloudinary(draftAvatar);
+      }
+      if (draftBanner && draftBanner.startsWith('data:')) {
+        finalBanner = await uploadToCloudinary(draftBanner);
+      }
+
+      setRegDisplayName(draftDisplayName);
+      setPronouns(draftPronouns);
+      setAboutMe(draftAboutMe);
+      setAvatarPreview(finalAvatar);
+      setBannerPreview(finalBanner);
+      setDraftAvatar(finalAvatar);
+      setDraftBanner(finalBanner);
+
+      const targetUsername = regUsername.trim().toLowerCase() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : '');
+      if (targetUsername) {
+        await updateUserProfile(targetUsername, {
+          displayName: draftDisplayName,
+          pronouns: draftPronouns,
+          aboutMe: draftAboutMe,
+          avatar: finalAvatar,
+          banner: finalBanner
+        });
+      }
+    } catch (err) {
+      console.error('Error saving settings to Firestore:', err);
+    } finally {
+      setIsSavingSettings(false);
+    }
+  };
+
+  const handleStatusChange = async (newStatus: UserStatus) => {
+    setUserStatus(newStatus);
+    setActiveSubMenu(null);
+    setShowUserSettings(false);
+    const targetUsername = regUsername.trim().toLowerCase() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : '');
+    if (targetUsername) {
+      await updateUserProfile(targetUsername, { status: newStatus });
+    }
+  };
+
+  const handleToggleMute = async () => {
+    const newVal = !isMuted;
+    setIsMuted(newVal);
+    const targetUsername = regUsername.trim().toLowerCase() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : '');
+    if (targetUsername) {
+      await updateUserProfile(targetUsername, { isMuted: newVal });
+    }
+  };
+
+  const handleToggleDeafen = async () => {
+    const newVal = !isDeafened;
+    setIsDeafened(newVal);
+    const targetUsername = regUsername.trim().toLowerCase() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : '');
+    if (targetUsername) {
+      await updateUserProfile(targetUsername, { isDeafened: newVal });
+    }
   };
 
   const hasUnsavedChanges =
@@ -471,17 +582,54 @@ export default function App() {
 
   // Scroll to bottom when channel messages change
   useEffect(() => {
-    if (activeServerId === 'yapcord-hq') {
+    if (activeServerId === 'yapzo-hq') {
       channelMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [channelMessages, activeChannelId, activeServerId]);
+
+  // Real-time Firestore subscriptions for channel messages
+  useEffect(() => {
+    if (screen !== 'app' || !activeChannelId) return;
+
+    const unsubscribe = subscribeToChannelMessages(activeChannelId, (messages) => {
+      setChannelMessages((prev) => ({
+        ...prev,
+        [activeChannelId]: messages
+      }));
+    });
+
+    return () => unsubscribe();
+  }, [screen, activeChannelId]);
+
+  // Real-time Firestore subscriptions for self notes
+  useEffect(() => {
+    const targetUsername = regUsername.trim().toLowerCase() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : '');
+    if (screen !== 'app' || !targetUsername) return;
+
+    const unsubscribe = subscribeToSelfMessages(targetUsername, (messages) => {
+      setSelfMessages(messages);
+    });
+
+    return () => unsubscribe();
+  }, [screen, regUsername, loginEmail]);
+
+  // Real-time Firestore subscriptions for all users (Player List)
+  useEffect(() => {
+    if (screen !== 'app') return;
+
+    const unsubscribe = subscribeToAllUsers((users) => {
+      setAllUsers(users);
+    });
+
+    return () => unsubscribe();
+  }, [screen]);
 
   // Save session state to localStorage whenever relevant fields change
   useEffect(() => {
     if (screen === 'app') {
       const sessionToSave: StoredSession = {
         isLoggedIn: true,
-        email: regEmail || loginEmail || 'user@yapcord.gg',
+        email: regEmail || loginEmail || 'user@yapzo.gg',
         displayName: regDisplayName || regUsername || (loginEmail ? loginEmail.split('@')[0] : 'juxtopposed'),
         username: regUsername || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : 'juxtopposed'),
         pronouns,
@@ -696,7 +844,7 @@ export default function App() {
   const currentYear = new Date().getFullYear();
   const years = Array.from({ length: 90 }, (_, i) => String(currentYear - 3 - i));
 
-  const handleLoginSubmit = (e: React.FormEvent) => {
+  const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const errors: { email?: string; password?: string } = {};
 
@@ -708,13 +856,48 @@ export default function App() {
     }
 
     setLoginErrors(errors);
+    if (Object.keys(errors).length > 0) return;
 
-    if (Object.keys(errors).length === 0) {
+    setIsLoggingIn(true);
+    try {
+      const user = await findUserByHandleOrEmail(loginEmail);
+      if (!user) {
+        setLoginErrors({ email: 'No account found with this email or username' });
+        setIsLoggingIn(false);
+        return;
+      }
+
+      if (user.password && user.password !== loginPassword) {
+        setLoginErrors({ password: 'Password does not match our records' });
+        setIsLoggingIn(false);
+        return;
+      }
+
+      // Logged in! Update online status in Firestore
+      await updateUserProfile(user.id, { status: 'online' });
+
+      setRegEmail(user.email);
+      setRegUsername(user.username);
+      setRegDisplayName(user.displayName);
+      setAvatarPreview(user.avatar);
+      setBannerPreview(user.banner);
+      setPronouns(user.pronouns || '');
+      setAboutMe(user.aboutMe || '');
+      setUserStatus(user.status || 'online');
+      setIsMuted(user.isMuted ?? false);
+      setIsDeafened(user.isDeafened ?? false);
+
+      setLoginErrors({});
       setScreen('loading');
+    } catch (err) {
+      console.error('Error during login:', err);
+      setScreen('loading');
+    } finally {
+      setIsLoggingIn(false);
     }
   };
 
-  const handleRegisterSubmit = (e: React.FormEvent) => {
+  const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const errors: { email?: string; username?: string; password?: string; dob?: string } = {};
 
@@ -728,6 +911,8 @@ export default function App() {
       errors.username = 'This field is required';
     } else if (regUsername.trim().length < 2) {
       errors.username = 'Must be between 2 and 32 characters in length';
+    } else if (!/^[a-zA-Z0-9_.-]+$/.test(regUsername.trim())) {
+      errors.username = 'Only letters, numbers, underscores, and dashes allowed';
     }
 
     if (!regPassword) {
@@ -741,9 +926,30 @@ export default function App() {
     }
 
     setRegErrors(errors);
+    if (Object.keys(errors).length > 0) return;
 
-    if (Object.keys(errors).length === 0) {
+    setIsCheckingAccount(true);
+    try {
+      const { usernameTaken, emailTaken } = await checkHandleOrEmailExists(regUsername, regEmail);
+      if (emailTaken) {
+        setRegErrors({ email: 'This email is already in use by another account' });
+        setIsCheckingAccount(false);
+        return;
+      }
+      if (usernameTaken) {
+        setRegErrors({ username: 'This handle / username is already taken' });
+        setIsCheckingAccount(false);
+        return;
+      }
+
+      setRegErrors({});
       setScreen('step1');
+    } catch (err) {
+      console.error('Error validating credentials with Firestore:', err);
+      // Advance to step 1
+      setScreen('step1');
+    } finally {
+      setIsCheckingAccount(false);
     }
   };
 
@@ -767,14 +973,80 @@ export default function App() {
 
   const handleForgotPassword = () => {
     if (!loginEmail.trim()) {
-      setLoginErrors({ email: 'Enter your email or phone number to reset password' });
+      setLoginErrors({ email: 'Enter your email or username to reset password' });
       return;
     }
     setForgotPasswordSent(true);
     setLoginErrors({});
   };
 
-  const handleLogout = () => {
+  const handleFinishRegistration = async () => {
+    if (!agreeTerms || !agreeGuidelines || !agreeRules) return;
+
+    setIsRegistering(true);
+    try {
+      let finalAvatar = avatarPreview;
+      let finalBanner = bannerPreview;
+
+      // Upload images to Cloudinary if they are local data URLs
+      if (avatarPreview && avatarPreview.startsWith('data:')) {
+        finalAvatar = await uploadToCloudinary(avatarPreview);
+      }
+      if (bannerPreview && bannerPreview.startsWith('data:')) {
+        finalBanner = await uploadToCloudinary(bannerPreview);
+      }
+
+      const normUsername = regUsername.trim().toLowerCase();
+      const normEmail = regEmail.trim().toLowerCase();
+      const effectiveDisplayName = regDisplayName.trim() || regUsername.trim();
+
+      const newProfile: UserProfile = {
+        id: normUsername,
+        username: normUsername,
+        email: normEmail,
+        displayName: effectiveDisplayName,
+        password: regPassword,
+        avatar: finalAvatar,
+        banner: finalBanner,
+        pronouns: pronouns.trim(),
+        aboutMe: aboutMe.trim(),
+        status: 'online',
+        isMuted: false,
+        isDeafened: false,
+        createdAt: Date.now(),
+        lastSeen: Date.now(),
+        birthDate: {
+          month: birthMonth,
+          day: birthDay,
+          year: birthYear
+        },
+        newsletter: subscribeNewsletter
+      };
+
+      await saveUserProfile(newProfile);
+
+      setAvatarPreview(finalAvatar);
+      setBannerPreview(finalBanner);
+      setRegUsername(normUsername);
+      setRegDisplayName(effectiveDisplayName);
+      setUserStatus('online');
+
+      setScreen('loading');
+    } catch (err) {
+      console.error('Error completing registration:', err);
+      setScreen('loading');
+    } finally {
+      setIsRegistering(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    const targetUsername = regUsername.trim().toLowerCase() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : '');
+    if (targetUsername) {
+      try {
+        await updateUserProfile(targetUsername, { status: 'offline' });
+      } catch {}
+    }
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {}
@@ -785,41 +1057,83 @@ export default function App() {
     setMode('login');
   };
 
-  // Send message to yourself
-  const handleSendMessage = (e: React.FormEvent) => {
+  // Send message to yourself (persisted to Firestore)
+  const handleSendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = chatInput.trim();
     if (!text) return;
 
-    const newMsg: ChatMessage = {
-      id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+    const currentMsg: Omit<ChatMessage, 'id'> = {
       text,
+      authorId: currentUsername,
+      authorUsername: currentUsername,
+      authorDisplayName: currentDisplayName,
+      authorAvatar: avatarPreview,
       timestamp: formatDiscordTimestamp(),
       createdAt: Date.now()
     };
 
-    setSelfMessages((prev) => [...prev, newMsg]);
     setChatInput('');
+
+    try {
+      await sendSelfMessage(currentUsername, currentMsg);
+    } catch (err) {
+      console.error('Error sending self note to Firestore:', err);
+      setSelfMessages((prev) => [
+        ...prev,
+        { id: `${Date.now()}`, ...currentMsg }
+      ]);
+    }
   };
 
-  // Send message in server channel (e.g. #welcome)
-  const handleSendChannelMessage = (e: React.FormEvent) => {
+  // Send message in server channel (persisted to Firestore in real time)
+  const handleSendChannelMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     const text = channelChatInput.trim();
     if (!text) return;
 
-    const newMsg: ChatMessage = {
-      id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+    const currentMsg: Omit<ChatMessage, 'id'> = {
+      channelId: activeChannelId,
       text,
+      authorId: currentUsername,
+      authorUsername: currentUsername,
+      authorDisplayName: currentDisplayName,
+      authorAvatar: avatarPreview,
       timestamp: formatDiscordTimestamp(),
       createdAt: Date.now()
     };
 
-    setChannelMessages((prev) => ({
-      ...prev,
-      [activeChannelId]: [...(prev[activeChannelId] || []), newMsg]
-    }));
     setChannelChatInput('');
+
+    try {
+      await sendChannelMessage(activeChannelId, currentMsg);
+    } catch (err) {
+      console.error('Error sending channel message to Firestore:', err);
+      setChannelMessages((prev) => ({
+        ...prev,
+        [activeChannelId]: [
+          ...(prev[activeChannelId] || []),
+          { id: `${Date.now()}`, ...currentMsg }
+        ]
+      }));
+    }
+  };
+
+  // Delete message handlers
+  const handleDeleteChannelMessage = async (channelId: string, messageId: string) => {
+    try {
+      await deleteChannelMessage(channelId, messageId);
+    } catch (err) {
+      console.error('Error deleting channel message:', err);
+    }
+  };
+
+  const handleDeleteSelfMessage = async (messageId: string) => {
+    try {
+      await deleteSelfMessage(currentUsername, messageId);
+    } catch (err) {
+      console.error('Error deleting self message:', err);
+    }
   };
 
   const allAgreed = agreeTerms && agreeGuidelines && agreeRules;
@@ -871,13 +1185,13 @@ export default function App() {
                 {transparentLogoUrl ? (
                   <img
                     src={transparentLogoUrl}
-                    alt="Yapcord Home"
+                    alt="Yapzo Home"
                     className="w-8 h-8 object-contain"
                   />
                 ) : (
                   <img
                     src="/logo.png"
-                    alt="Yapcord Home"
+                    alt="Yapzo Home"
                     className="w-8 h-8 object-contain"
                   />
                 )}
@@ -887,11 +1201,11 @@ export default function App() {
             {/* Separator */}
             <div className="w-8 h-[2px] bg-[#232428] rounded my-0.5" />
 
-            {/* YAPCORD HQ SERVER BUTTON (AUTO-JOINED BY EVERYONE) */}
+            {/* YAPZO HQ SERVER BUTTON (AUTO-JOINED BY EVERYONE) */}
             <div className="relative flex items-center justify-center w-full group">
               <div
                 className={`absolute left-0 w-1 rounded-r-full bg-[#ff6b00] transition-all duration-200 ${
-                  !isHomeSelected && activeServerId === 'yapcord-hq'
+                  !isHomeSelected && activeServerId === 'yapzo-hq'
                     ? 'h-10'
                     : 'h-0 group-hover:h-5'
                 }`}
@@ -901,15 +1215,15 @@ export default function App() {
                 type="button"
                 onClick={() => {
                   setIsHomeSelected(false);
-                  setActiveServerId('yapcord-hq');
+                  setActiveServerId('yapzo-hq');
                   setShowServerMenu(false);
                 }}
                 className={`w-12 h-12 flex items-center justify-center transition-all duration-200 cursor-pointer font-bold select-none text-[14px] tracking-wide ${
-                  !isHomeSelected && activeServerId === 'yapcord-hq'
+                  !isHomeSelected && activeServerId === 'yapzo-hq'
                     ? 'rounded-[16px] bg-[#ff6b00] text-white shadow-[0_0_16px_rgba(255,107,0,0.4)]'
                     : 'rounded-[24px] hover:rounded-[16px] bg-[#18191c] hover:bg-[#ff6b00] text-[#dbdee1] hover:text-white'
                 }`}
-                title="Yapcord HQ"
+                title="Yapzo HQ"
               >
                 <span>YHQ</span>
               </button>
@@ -1146,12 +1460,12 @@ export default function App() {
                 )}
               </div>
             </>
-          ) : activeServerId === 'yapcord-hq' ? (
+          ) : activeServerId === 'yapzo-hq' ? (
             <>
-              {/* SERVER HEADER: Yapcord HQ */}
+              {/* SERVER HEADER: Yapzo HQ */}
               <div className="h-12 border-b border-[#111214] px-4 font-bold text-white flex items-center justify-between hover:bg-[#232428]/60 cursor-pointer transition-colors shadow-xs flex-shrink-0 select-none">
                 <div className="flex items-center gap-2 truncate">
-                  <span className="truncate text-[15px] font-bold">Yapcord HQ</span>
+                  <span className="truncate text-[15px] font-bold">Yapzo HQ</span>
                 </div>
                 <ChevronDown className="w-4 h-4 text-[#949ba4] flex-shrink-0" />
               </div>
@@ -1159,7 +1473,7 @@ export default function App() {
               {/* CHANNELS LIST: categorized */}
               <div className="flex-1 overflow-y-auto px-2 py-3 space-y-4 select-none">
                 {['Information', 'Text Channels'].map((cat) => {
-                  const channelsInCat = YAPCORD_HQ_CHANNELS.filter((ch) => ch.category === cat);
+                  const channelsInCat = YAPZO_HQ_CHANNELS.filter((ch) => ch.category === cat);
                   if (channelsInCat.length === 0) return null;
                   return (
                     <div key={cat} className="space-y-0.5">
@@ -1248,7 +1562,7 @@ export default function App() {
             <div className="flex items-center gap-0.5 text-[#949ba4]">
               <button
                 type="button"
-                onClick={() => setIsMuted(!isMuted)}
+                onClick={handleToggleMute}
                 className={`p-1.5 rounded-[4px] hover:bg-[#232428] hover:text-[#dbdee1] transition-colors cursor-pointer ${
                   isMuted ? 'text-[#f23f43]' : ''
                 }`}
@@ -1259,7 +1573,7 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => setIsDeafened(!isDeafened)}
+                onClick={handleToggleDeafen}
                 className={`p-1.5 rounded-[4px] hover:bg-[#232428] hover:text-[#dbdee1] transition-colors cursor-pointer ${
                   isDeafened ? 'text-[#f23f43]' : ''
                 }`}
@@ -1309,10 +1623,7 @@ export default function App() {
                         <button
                           key={st}
                           type="button"
-                          onClick={() => {
-                            setUserStatus(st);
-                            setActiveSubMenu(null);
-                          }}
+                          onClick={() => handleStatusChange(st)}
                           className={`w-full flex items-center justify-between px-2.5 py-1.5 text-[13px] rounded-[4px] transition-colors cursor-pointer text-left ${
                             userStatus === st
                               ? 'bg-[#ff6b00]/20 text-[#ff8f3d]'
@@ -1354,7 +1665,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* MAIN BODY AREA: EITHER HOME (DM) OR YAPCORD HQ SERVER CHANNELS */}
+        {/* MAIN BODY AREA: EITHER HOME (DM) OR YAPZO HQ SERVER CHANNELS */}
         <main className="flex-1 bg-[#111214] flex flex-col min-w-0 relative">
           {isHomeSelected ? (
             selectedDm === 'self' ? (
@@ -1441,6 +1752,14 @@ export default function App() {
                               {msg.text}
                             </p>
                           </div>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteSelfMessage(msg.id)}
+                            className="opacity-0 group-hover:opacity-100 text-[#949ba4] hover:text-[#f23f43] p-1 transition-all cursor-pointer self-start"
+                            title="Delete note"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
                         </div>
                       ))}
                       <div ref={messagesEndRef} />
@@ -1571,7 +1890,7 @@ export default function App() {
                             About Me
                           </div>
                           <p className="text-[13px] text-[#dbdee1] leading-relaxed whitespace-pre-wrap">
-                            {aboutMe || 'Hey there! Using Yapcord.'}
+                            {aboutMe || 'Hey there! Using Yapzo.'}
                           </p>
                         </div>
 
@@ -1596,8 +1915,8 @@ export default function App() {
                 Select a conversation to start chatting
               </div>
             )
-          ) : activeServerId === 'yapcord-hq' ? (
-            /* YAPCORD HQ SERVER VIEW (CHANNELS + REAL PLAYER LIST) */
+          ) : activeServerId === 'yapzo-hq' ? (
+            /* YAPZO HQ SERVER VIEW (CHANNELS + REAL PLAYER LIST) */
             <div className="flex flex-col h-full w-full">
               {/* Channel Header Bar */}
               <div className="h-12 border-b border-[#18191c] bg-[#18191c] px-4 flex items-center justify-between flex-shrink-0 shadow-xs z-10">
@@ -1606,7 +1925,7 @@ export default function App() {
                   <span className="font-bold text-white text-[16px] mr-3">{activeChannelId}</span>
                   <div className="h-4 w-[1px] bg-[#2b2d31] mx-2 hidden sm:block" />
                   <span className="text-[13px] text-[#949ba4] hidden sm:inline truncate">
-                    {YAPCORD_HQ_CHANNELS.find((c) => c.id === activeChannelId)?.description ||
+                    {YAPZO_HQ_CHANNELS.find((c) => c.id === activeChannelId)?.description ||
                       `Welcome to #${activeChannelId}!`}
                   </span>
                 </div>
@@ -1643,21 +1962,21 @@ export default function App() {
                         Welcome to #{activeChannelId}!
                       </h2>
                       <p className="text-[#949ba4] text-[15px]">
-                        {YAPCORD_HQ_CHANNELS.find((c) => c.id === activeChannelId)?.description ||
-                          `This is the start of the #${activeChannelId} channel in Yapcord HQ.`}
+                        {YAPZO_HQ_CHANNELS.find((c) => c.id === activeChannelId)?.description ||
+                          `This is the start of the #${activeChannelId} channel in Yapzo HQ.`}
                       </p>
                       <div className="h-[1px] bg-[#232428] mt-6" />
                     </div>
 
-                    {/* Rendered messages in this channel (no fake messages) */}
+                    {/* Rendered messages in this channel (real-time Firestore messages from all members) */}
                     {(channelMessages[activeChannelId] || []).map((msg) => (
                       <div
                         key={msg.id}
                         className="flex gap-4 py-1 px-3 -mx-3 hover:bg-[#18191c]/60 rounded-[4px] group transition-colors"
                       >
                         <div className="w-10 h-10 rounded-full bg-[#18191c] overflow-hidden flex items-center justify-center text-white flex-shrink-0 mt-0.5 ring-2 ring-[#232428]">
-                          {avatarPreview ? (
-                            <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
+                          {msg.authorAvatar ? (
+                            <img src={msg.authorAvatar} alt="Avatar" className="w-full h-full object-cover" />
                           ) : (
                             <User className="w-5 h-5 text-[#ff6b00]" />
                           )}
@@ -1665,7 +1984,7 @@ export default function App() {
                         <div className="min-w-0 flex-1">
                           <div className="flex items-baseline gap-2">
                             <span className="font-semibold text-white text-[15px] hover:underline cursor-pointer">
-                              {currentDisplayName}
+                              {msg.authorDisplayName || msg.authorUsername || 'Member'}
                             </span>
                             <span className="text-[11px] text-[#949ba4]">
                               {msg.timestamp}
@@ -1675,6 +1994,16 @@ export default function App() {
                             {msg.text}
                           </p>
                         </div>
+                        {msg.authorUsername === currentUsername && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteChannelMessage(activeChannelId, msg.id)}
+                            className="opacity-0 group-hover:opacity-100 text-[#949ba4] hover:text-[#f23f43] p-1 transition-all cursor-pointer self-start"
+                            title="Delete message"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
                       </div>
                     ))}
                     <div ref={channelMessagesEndRef} />
@@ -1724,43 +2053,132 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Player List on the right (strictly no fake people) */}
-                {showPlayerList && (
-                  <aside className="w-60 bg-[#18191c] border-l border-[#111214]/60 flex flex-col flex-shrink-0 p-3 overflow-y-auto select-none">
-                    <div className="text-[12px] font-bold text-[#949ba4] uppercase tracking-wider px-2 mb-2">
-                      Online — 1
-                    </div>
+                {/* Player List on the right (Real users from Firestore) */}
+                {showPlayerList && (() => {
+                  const userMap = new Map<string, UserProfile>();
+                  allUsers.forEach((u) => userMap.set(u.username, u));
+                  if (currentUsername) {
+                    userMap.set(currentUsername, {
+                      id: currentUsername,
+                      username: currentUsername,
+                      email: regEmail || loginEmail,
+                      displayName: currentDisplayName,
+                      avatar: avatarPreview,
+                      banner: bannerPreview,
+                      pronouns,
+                      aboutMe,
+                      status: userStatus,
+                      isMuted,
+                      isDeafened,
+                      createdAt: Date.now(),
+                      lastSeen: Date.now()
+                    });
+                  }
+                  const mergedList = Array.from(userMap.values());
+                  const onlineMembers = mergedList.filter((u) =>
+                    u.username === currentUsername ? userStatus !== 'offline' : u.status !== 'offline'
+                  );
+                  const offlineMembers = mergedList.filter((u) =>
+                    u.username === currentUsername ? userStatus === 'offline' : u.status === 'offline'
+                  );
 
-                    {/* Player item: Current User only (no fake people) */}
-                    <div className="flex items-center gap-3 px-2 py-1.5 rounded-[4px] hover:bg-[#232428]/80 cursor-pointer group transition-colors">
-                      <div className="relative flex-shrink-0">
-                        <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-2 ring-[#232428]">
-                          {avatarPreview ? (
-                            <img src={avatarPreview} alt="Avatar" className="w-full h-full object-cover" />
-                          ) : (
-                            <User className="w-4 h-4 text-[#ff6b00]" />
-                          )}
-                        </div>
-                        <div
-                          className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#18191c] ${
-                            STATUS_CONFIG[userStatus].bgClass
-                          }`}
-                          title={STATUS_CONFIG[userStatus].label}
-                        />
+                  return (
+                    <aside className="w-60 bg-[#18191c] border-l border-[#111214]/60 flex flex-col flex-shrink-0 p-3 overflow-y-auto select-none">
+                      <div className="text-[12px] font-bold text-[#949ba4] uppercase tracking-wider px-2 mb-2">
+                        Online — {onlineMembers.length}
                       </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-semibold text-white text-[14px] leading-tight truncate group-hover:text-white">
-                            {currentDisplayName}
-                          </span>
-                        </div>
-                        <p className="text-[11px] text-[#949ba4] leading-tight truncate mt-0.5">
-                          {aboutMe || STATUS_CONFIG[userStatus].label}
-                        </p>
+
+                      <div className="space-y-1 mb-4">
+                        {onlineMembers.map((u) => {
+                          const isCurrent = u.username === currentUsername;
+                          const uStatus = isCurrent ? userStatus : u.status;
+                          const uAvatar = isCurrent ? avatarPreview : u.avatar;
+                          const uDisplayName = isCurrent ? currentDisplayName : u.displayName || u.username;
+                          const uAboutMe = isCurrent ? aboutMe : u.aboutMe;
+
+                          return (
+                            <div
+                              key={u.username}
+                              className="flex items-center gap-3 px-2 py-1.5 rounded-[4px] hover:bg-[#232428]/80 cursor-pointer group transition-colors"
+                            >
+                              <div className="relative flex-shrink-0">
+                                <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-2 ring-[#232428]">
+                                  {uAvatar ? (
+                                    <img src={uAvatar} alt="Avatar" className="w-full h-full object-cover" />
+                                  ) : (
+                                    <User className="w-4 h-4 text-[#ff6b00]" />
+                                  )}
+                                </div>
+                                <div
+                                  className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#18191c] ${
+                                    STATUS_CONFIG[uStatus]?.bgClass || STATUS_CONFIG.online.bgClass
+                                  }`}
+                                  title={STATUS_CONFIG[uStatus]?.label || 'Online'}
+                                />
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-semibold text-white text-[14px] leading-tight truncate group-hover:text-white">
+                                    {uDisplayName}
+                                  </span>
+                                  {isCurrent && (
+                                    <span className="text-[9px] px-1 py-0.5 bg-[#ff6b00]/20 text-[#ff8f3d] font-bold rounded">
+                                      YOU
+                                    </span>
+                                  )}
+                                </div>
+                                <p className="text-[11px] text-[#949ba4] leading-tight truncate mt-0.5">
+                                  {uAboutMe || STATUS_CONFIG[uStatus]?.label || 'Online'}
+                                </p>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
-                    </div>
-                  </aside>
-                )}
+
+                      {offlineMembers.length > 0 && (
+                        <>
+                          <div className="text-[12px] font-bold text-[#949ba4] uppercase tracking-wider px-2 mb-2">
+                            Offline — {offlineMembers.length}
+                          </div>
+                          <div className="space-y-1">
+                            {offlineMembers.map((u) => {
+                              const isCurrent = u.username === currentUsername;
+                              const uAvatar = isCurrent ? avatarPreview : u.avatar;
+                              const uDisplayName = isCurrent ? currentDisplayName : u.displayName || u.username;
+
+                              return (
+                                <div
+                                  key={u.username}
+                                  className="flex items-center gap-3 px-2 py-1.5 rounded-[4px] hover:bg-[#232428]/80 cursor-pointer group transition-colors opacity-60 hover:opacity-100"
+                                >
+                                  <div className="relative flex-shrink-0">
+                                    <div className="w-8 h-8 rounded-full bg-[#111214] overflow-hidden flex items-center justify-center text-white ring-2 ring-[#232428]">
+                                      {uAvatar ? (
+                                        <img src={uAvatar} alt="Avatar" className="w-full h-full object-cover" />
+                                      ) : (
+                                        <User className="w-4 h-4 text-[#80848e]" />
+                                      )}
+                                    </div>
+                                    <div
+                                      className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 border-[#18191c] bg-[#80848e]"
+                                      title="Offline"
+                                    />
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <span className="font-semibold text-[#949ba4] text-[14px] leading-tight truncate group-hover:text-white">
+                                      {uDisplayName}
+                                    </span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </>
+                      )}
+                    </aside>
+                  );
+                })()}
               </div>
             </div>
           ) : (
@@ -2007,7 +2425,7 @@ export default function App() {
                             About Me
                           </span>
                           <p className="text-[13px] text-[#dbdee1] leading-relaxed whitespace-pre-wrap">
-                            {draftAboutMe || 'Hey there! Using Yapcord.'}
+                            {draftAboutMe || 'Hey there! Using Yapzo.'}
                           </p>
                         </div>
 
@@ -2032,17 +2450,20 @@ export default function App() {
                   <div className="flex items-center gap-3 flex-shrink-0">
                     <button
                       type="button"
+                      disabled={isSavingSettings}
                       onClick={handleResetSettings}
-                      className="text-white hover:underline text-[14px] font-medium px-2 py-1 cursor-pointer transition-all"
+                      className="text-white hover:underline text-[14px] font-medium px-2 py-1 cursor-pointer transition-all disabled:opacity-50"
                     >
                       Reset
                     </button>
                     <button
                       type="button"
+                      disabled={isSavingSettings}
                       onClick={handleSaveSettings}
-                      className="bg-[#23a55a] hover:bg-[#1f9350] active:bg-[#1a7f45] text-white font-medium text-[14px] px-4 py-1.5 rounded-[3px] transition-colors cursor-pointer shadow-sm"
+                      className="bg-[#23a55a] hover:bg-[#1f9350] active:bg-[#1a7f45] disabled:opacity-60 disabled:cursor-not-allowed text-white font-medium text-[14px] px-4 py-1.5 rounded-[3px] transition-colors cursor-pointer shadow-sm flex items-center gap-1.5"
                     >
-                      Save Changes
+                      {isSavingSettings && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      {isSavingSettings ? 'Saving...' : 'Save Changes'}
                     </button>
                   </div>
                 </div>
@@ -2067,28 +2488,14 @@ export default function App() {
           </div>
         )}
 
-        {/* IMAGE RESIZE MODAL (ROTATE REMOVED) */}
+        {/* IMAGE RESIZE MODAL */}
         {cropModal && cropModal.isOpen && (
           <ImageCropModal
             imageSrc={cropModal.imageSrc}
             isAvatar={cropModal.isAvatar}
             onCancel={() => setCropModal(null)}
-            onApply={(resultDataUrl) => {
-              if (isSettingsOpen) {
-                if (cropModal.isAvatar) {
-                  setDraftAvatar(resultDataUrl);
-                } else {
-                  setDraftBanner(resultDataUrl);
-                }
-              } else {
-                if (cropModal.isAvatar) {
-                  setAvatarPreview(resultDataUrl);
-                } else {
-                  setBannerPreview(resultDataUrl);
-                }
-              }
-              setCropModal(null);
-            }}
+            onApply={handleCropApply}
+            isUploading={isUploadingImage}
           />
         )}
       </div>
@@ -2105,13 +2512,13 @@ export default function App() {
             {transparentLogoUrl ? (
               <img
                 src={transparentLogoUrl}
-                alt="Yapcord"
+                alt="Yapzo"
                 className="w-full h-full object-contain filter drop-shadow-[0_0_24px_rgba(255,107,0,0.22)]"
               />
             ) : (
               <img
                 src="/logo.png"
-                alt="Yapcord"
+                alt="Yapzo"
                 className="w-full h-full object-contain opacity-0"
               />
             )}
@@ -2257,14 +2664,8 @@ export default function App() {
             imageSrc={cropModal.imageSrc}
             isAvatar={cropModal.isAvatar}
             onCancel={() => setCropModal(null)}
-            onApply={(resultDataUrl) => {
-              if (cropModal.isAvatar) {
-                setAvatarPreview(resultDataUrl);
-              } else {
-                setBannerPreview(resultDataUrl);
-              }
-              setCropModal(null);
-            }}
+            onApply={handleCropApply}
+            isUploading={isUploadingImage}
           />
         )}
       </div>
@@ -2296,7 +2697,7 @@ export default function App() {
                 1. Acceptance of Terms
               </h4>
               <p className="text-[#949ba4]">
-                By registering for Yapcord, you confirm that you have read, understood, and agreed to be legally bound by these Terms of Service and Community Guidelines. If you do not accept these terms in full, you may not access or use Yapcord.
+                By registering for Yapzo, you confirm that you have read, understood, and agreed to be legally bound by these Terms of Service and Community Guidelines. If you do not accept these terms in full, you may not access or use Yapzo.
               </p>
             </section>
 
@@ -2314,7 +2715,7 @@ export default function App() {
                 3. Respectful Communication &amp; Zero Tolerance
               </h4>
               <p className="text-[#949ba4]">
-                Yapcord maintains strict zero-tolerance policies against harassment, hate speech, bullying, doxing, non-consensual media sharing, and coordinated attacks. Users engaging in such conduct will have their accounts banned permanently.
+                Yapzo maintains strict zero-tolerance policies against harassment, hate speech, bullying, doxing, non-consensual media sharing, and coordinated attacks. Users engaging in such conduct will have their accounts banned permanently.
               </p>
             </section>
 
@@ -2332,7 +2733,7 @@ export default function App() {
                 5. Account Security
               </h4>
               <p className="text-[#949ba4]">
-                You are responsible for keeping your login credentials confidential. Yapcord staff will never ask for your password. Any activity originating from your account is your sole legal responsibility.
+                You are responsible for keeping your login credentials confidential. Yapzo staff will never ask for your password. Any activity originating from your account is your sole legal responsibility.
               </p>
             </section>
 
@@ -2341,7 +2742,7 @@ export default function App() {
                 6. Automated Scraping &amp; Raiding
               </h4>
               <p className="text-[#949ba4]">
-                Automated token scraping, user raiding, spamming direct messages, and utilizing self-bots that bypass our client limits violate Yapcord engineering integrity and will trigger immediate IP termination.
+                Automated token scraping, user raiding, spamming direct messages, and utilizing self-bots that bypass our client limits violate Yapzo engineering integrity and will trigger immediate IP termination.
               </p>
             </section>
 
@@ -2350,7 +2751,7 @@ export default function App() {
                 7. Content Ownership &amp; Licensing
               </h4>
               <p className="text-[#949ba4]">
-                You retain ownership of the text and media you share. By submitting content through Yapcord, you grant us the technical license necessary to host, encode, and transmit your data to your selected recipients.
+                You retain ownership of the text and media you share. By submitting content through Yapzo, you grant us the technical license necessary to host, encode, and transmit your data to your selected recipients.
               </p>
             </section>
 
@@ -2359,7 +2760,7 @@ export default function App() {
                 8. Enforcement &amp; Termination
               </h4>
               <p className="text-[#949ba4]">
-                Yapcord moderators reserve the right to review reported content, apply temporary timeouts, delete offensive servers, or permanently terminate any account that violates platform standards.
+                Yapzo moderators reserve the right to review reported content, apply temporary timeouts, delete offensive servers, or permanently terminate any account that violates platform standards.
               </p>
             </section>
           </div>
@@ -2377,7 +2778,7 @@ export default function App() {
                 {agreeTerms && <Check className="w-3.5 h-3.5 text-white stroke-[3]" />}
               </div>
               <span className="text-[13px] text-[#dbdee1] leading-tight">
-                I have read and agree to all provisions of the Yapcord Terms of Service. <span className="text-[#ff6b00]">*</span>
+                I have read and agree to all provisions of the Yapzo Terms of Service. <span className="text-[#ff6b00]">*</span>
               </span>
             </label>
 
@@ -2416,15 +2817,16 @@ export default function App() {
           <div className="flex flex-col gap-2.5">
             <button
               type="button"
-              disabled={!allAgreed}
-              onClick={() => setScreen('loading')}
-              className={`w-full h-11 font-medium text-[16px] rounded-[3px] transition-colors ${
-                allAgreed
+              disabled={!allAgreed || isRegistering}
+              onClick={handleFinishRegistration}
+              className={`w-full h-11 font-medium text-[16px] rounded-[3px] transition-colors flex items-center justify-center gap-2 ${
+                allAgreed && !isRegistering
                   ? 'bg-[#ff6b00] hover:bg-[#e55b00] active:bg-[#cc4e00] text-white cursor-pointer'
                   : 'bg-[#ff6b00]/30 text-white/40 cursor-not-allowed'
               }`}
             >
-              Done
+              {isRegistering && <Loader2 className="w-5 h-5 animate-spin" />}
+              {isRegistering ? 'Creating Account & Saving...' : 'Done'}
             </button>
             <button
               type="button"
@@ -2463,7 +2865,7 @@ export default function App() {
           <form onSubmit={handleLoginSubmit} noValidate>
             <div className="mb-5">
               <label className="block text-[12px] font-bold tracking-wider text-[#b5bac1] uppercase mb-2">
-                Email or Phone Number{' '}
+                Email or Username{' '}
                 {loginErrors.email ? (
                   <span className="text-[#ff5c00] italic font-normal lowercase tracking-normal">
                     - {loginErrors.email}
@@ -2486,7 +2888,7 @@ export default function App() {
                     ? 'border-[#ff5c00]'
                     : 'border-transparent focus:border-[#ff6b00]'
                 }`}
-                autoComplete="email"
+                autoComplete="username"
               />
             </div>
 
@@ -2545,9 +2947,11 @@ export default function App() {
 
             <button
               type="submit"
-              className="w-full h-11 bg-[#ff6b00] hover:bg-[#e55b00] active:bg-[#cc4e00] text-white font-medium text-[16px] rounded-[3px] transition-colors cursor-pointer mb-2"
+              disabled={isLoggingIn}
+              className="w-full h-11 bg-[#ff6b00] hover:bg-[#e55b00] active:bg-[#cc4e00] disabled:opacity-60 disabled:cursor-not-allowed text-white font-medium text-[16px] rounded-[3px] transition-colors cursor-pointer mb-2 flex items-center justify-center gap-2"
             >
-              Log In
+              {isLoggingIn && <Loader2 className="w-5 h-5 animate-spin" />}
+              {isLoggingIn ? 'Logging In...' : 'Log In'}
             </button>
 
             <div className="mt-2 text-[14px] text-[#949ba4]">
@@ -2802,15 +3206,17 @@ export default function App() {
                 onClick={() => setSubscribeNewsletter(!subscribeNewsletter)}
                 className="text-[12px] text-[#949ba4] cursor-pointer select-none leading-tight"
               >
-                (Optional) It's okay to send me emails with Yapcord updates, tips, and special offers. You can opt out at any time.
+                (Optional) It's okay to send me emails with Yapzo updates, tips, and special offers. You can opt out at any time.
               </span>
             </div>
 
             <button
               type="submit"
-              className="w-full h-11 bg-[#ff6b00] hover:bg-[#e55b00] active:bg-[#cc4e00] text-white font-medium text-[16px] rounded-[3px] transition-colors cursor-pointer mb-3"
+              disabled={isCheckingAccount}
+              className="w-full h-11 bg-[#ff6b00] hover:bg-[#e55b00] active:bg-[#cc4e00] disabled:opacity-60 disabled:cursor-not-allowed text-white font-medium text-[16px] rounded-[3px] transition-colors cursor-pointer mb-3 flex items-center justify-center gap-2"
             >
-              Continue
+              {isCheckingAccount && <Loader2 className="w-5 h-5 animate-spin" />}
+              {isCheckingAccount ? 'Checking availability...' : 'Continue'}
             </button>
 
             <p className="text-[12px] text-[#949ba4] leading-relaxed mb-4">
