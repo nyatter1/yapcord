@@ -65,11 +65,16 @@ import {
   subscribeToFriends,
   togglePinDm,
   clearUserDmChat,
-  setClosedDm
+  setClosedDm,
+  TypingUser,
+  setTypingStatus,
+  subscribeToTyping
 } from './lib/database';
 import { ChatMessageItem } from './components/ChatMessageItem';
 import { FriendsView } from './components/FriendsView';
 import { EmojiPicker } from './components/EmojiPicker';
+import { TypingIndicator } from './components/TypingIndicator';
+import { MentionAutocomplete, MentionCandidate } from './components/MentionAutocomplete';
 
 type Screen = 'auth' | 'step1' | 'step2' | 'loading' | 'app';
 type AuthMode = 'login' | 'register';
@@ -434,6 +439,26 @@ export default function App() {
   const [chatInput, setChatInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const dmChatMessagesEndRef = useRef<HTMLDivElement>(null);
+  const channelInputRef = useRef<HTMLInputElement>(null);
+  const dmInputRef = useRef<HTMLInputElement>(null);
+
+  // Real-time typing indicators state
+  const [channelTypingUsers, setChannelTypingUsers] = useState<TypingUser[]>([]);
+  const [dmTypingUsers, setDmTypingUsers] = useState<TypingUser[]>([]);
+  const channelTypingTimeoutRef = useRef<any>(null);
+  const dmTypingTimeoutRef = useRef<any>(null);
+  const isChannelTypingRef = useRef(false);
+  const isDmTypingRef = useRef(false);
+
+  // Mention autocomplete popup state
+  const [mentionState, setMentionState] = useState<{
+    isOpen: boolean;
+    query: string;
+    cursorIndex: number;
+    target: 'channel' | 'dm';
+    candidates: MentionCandidate[];
+    selectedIndex: number;
+  } | null>(null);
 
   // Replying state (inline Discord quote)
   const [replyTarget, setReplyTarget] = useState<{
@@ -989,6 +1014,35 @@ export default function App() {
     }
   }, [dmChatMessages, selectedDm, isHomeSelected]);
 
+  // Real-time listener for channel typing
+  useEffect(() => {
+    if (screen !== 'app' || !activeChannelId || isHomeSelected) {
+      setChannelTypingUsers([]);
+      return;
+    }
+    const contextId = `channel_${activeChannelId}`;
+    const unsubscribe = subscribeToTyping(contextId, (users) => {
+      const others = users.filter((u) => u.username.toLowerCase() !== currentUsername.toLowerCase());
+      setChannelTypingUsers(others);
+    });
+    return () => unsubscribe();
+  }, [screen, activeChannelId, isHomeSelected, currentUsername]);
+
+  // Real-time listener for DM typing
+  useEffect(() => {
+    if (screen !== 'app' || !isHomeSelected || selectedDm === 'self' || !selectedDm) {
+      setDmTypingUsers([]);
+      return;
+    }
+    const dmChatId = getDmChatId(currentUsername, selectedDm);
+    const contextId = `dm_${dmChatId}`;
+    const unsubscribe = subscribeToTyping(contextId, (users) => {
+      const others = users.filter((u) => u.username.toLowerCase() !== currentUsername.toLowerCase());
+      setDmTypingUsers(others);
+    });
+    return () => unsubscribe();
+  }, [screen, isHomeSelected, selectedDm, currentUsername]);
+
   // Save session state to localStorage whenever relevant fields change
   useEffect(() => {
     if (screen === 'app') {
@@ -1519,6 +1573,14 @@ export default function App() {
     setChatInput('');
     setDmAttachment(null);
     setReplyTarget(null);
+    setMentionState(null);
+
+    if (selectedDm !== 'self' && currentUsername) {
+      const dmChatId = getDmChatId(currentUsername, selectedDm);
+      if (dmTypingTimeoutRef.current) clearTimeout(dmTypingTimeoutRef.current);
+      isDmTypingRef.current = false;
+      setTypingStatus(`dm_${dmChatId}`, { username: currentUsername, displayName: currentDisplayName, avatar: avatarPreview }, false);
+    }
 
     try {
       if (selectedDm === 'self') {
@@ -1573,11 +1635,264 @@ export default function App() {
     setChannelChatInput('');
     setChannelAttachment(null);
     setReplyTarget(null);
+    setMentionState(null);
+
+    if (activeChannelId && currentUsername) {
+      if (channelTypingTimeoutRef.current) clearTimeout(channelTypingTimeoutRef.current);
+      isChannelTypingRef.current = false;
+      setTypingStatus(`channel_${activeChannelId}`, { username: currentUsername, displayName: currentDisplayName, avatar: avatarPreview }, false);
+    }
 
     try {
       await sendChannelMessage(activeChannelId, currentMsg);
     } catch (err) {
       console.error('Error sending channel message:', err);
+    }
+  };
+
+  // Mention autocomplete search
+  const handleMentionSearch = (text: string, target: 'channel' | 'dm', selectionStart?: number) => {
+    const pos = selectionStart !== undefined ? selectionStart : text.length;
+    const textBeforeCursor = text.slice(0, pos);
+    const match = textBeforeCursor.match(/@([a-zA-Z0-9_.-]*)$/);
+
+    if (!match) {
+      setMentionState(null);
+      return;
+    }
+
+    const query = match[1].toLowerCase();
+    const mentionStart = match.index!;
+    const candidates: MentionCandidate[] = [];
+
+    if (target === 'channel') {
+      // In a server channel: include @everyone first
+      if ('everyone'.includes(query) || !query) {
+        candidates.push({
+          id: 'everyone',
+          type: 'everyone',
+          username: 'everyone',
+          displayName: '@everyone',
+          description: 'Notify everyone in this server'
+        });
+      }
+
+      const seen = new Set<string>();
+      const memberList: UserProfile[] = [...allUsers];
+      if (currentUsername && !memberList.some((u) => u.username.toLowerCase() === currentUsername.toLowerCase())) {
+        memberList.push({
+          id: currentUsername,
+          username: currentUsername,
+          displayName: currentDisplayName,
+          email: '',
+          avatar: avatarPreview,
+          banner: bannerPreview,
+          pronouns,
+          aboutMe,
+          status: userStatus,
+          isMuted,
+          isDeafened,
+          createdAt: Date.now(),
+          lastSeen: Date.now()
+        });
+      }
+
+      for (const u of memberList) {
+        const uLower = (u.username || '').toLowerCase();
+        if (seen.has(uLower)) continue;
+        seen.add(uLower);
+        const dLower = (u.displayName || '').toLowerCase();
+        if (!query || uLower.includes(query) || dLower.includes(query)) {
+          candidates.push({
+            id: u.username,
+            type: 'user',
+            username: u.username,
+            displayName: u.displayName || u.username,
+            avatar: u.username.toLowerCase() === currentUsername.toLowerCase() ? avatarPreview : u.avatar,
+            status: u.username.toLowerCase() === currentUsername.toLowerCase() ? userStatus : u.status,
+            description: u.username.toLowerCase() === currentUsername.toLowerCase() ? 'You' : undefined
+          });
+        }
+      }
+    } else {
+      // In a DM: only people in that DM
+      const dmCandidates: MentionCandidate[] = [];
+      if (selectedDm && selectedDm !== 'self') {
+        const friendProfile = allUsers.find((u) => u.username.toLowerCase() === selectedDm.toLowerCase());
+        dmCandidates.push({
+          id: selectedDm,
+          type: 'user',
+          username: selectedDm,
+          displayName: friendProfile?.displayName || selectedFriend?.displayName || selectedDm,
+          avatar: friendProfile?.avatar || selectedFriend?.avatar || null,
+          status: friendProfile?.status || selectedFriend?.status || 'offline'
+        });
+      }
+      dmCandidates.push({
+        id: currentUsername,
+        type: 'user',
+        username: currentUsername,
+        displayName: currentDisplayName,
+        avatar: avatarPreview,
+        status: userStatus,
+        description: 'You'
+      });
+
+      for (const p of dmCandidates) {
+        const uLower = p.username.toLowerCase();
+        const dLower = p.displayName.toLowerCase();
+        if (!query || uLower.includes(query) || dLower.includes(query)) {
+          candidates.push(p);
+        }
+      }
+    }
+
+    if (candidates.length > 0) {
+      setMentionState({
+        isOpen: true,
+        query,
+        cursorIndex: mentionStart,
+        target,
+        candidates,
+        selectedIndex: 0
+      });
+    } else {
+      setMentionState(null);
+    }
+  };
+
+  const handleSelectMention = (candidate: MentionCandidate) => {
+    if (!mentionState) return;
+    const { target, cursorIndex } = mentionState;
+    const isChannel = target === 'channel';
+    const currentVal = isChannel ? channelChatInput : chatInput;
+    const inputRef = isChannel ? channelInputRef : dmInputRef;
+
+    const before = currentVal.slice(0, cursorIndex);
+    const afterAt = currentVal.slice(cursorIndex + 1);
+    const match = afterAt.match(/^[a-zA-Z0-9_.-]*/);
+    const queryLen = match ? match[0].length : 0;
+    const after = currentVal.slice(cursorIndex + 1 + queryLen);
+
+    const tagText = candidate.type === 'everyone' ? '@everyone ' : `@${candidate.username} `;
+    const newVal = before + tagText + after;
+
+    if (isChannel) {
+      setChannelChatInput(newVal);
+    } else {
+      setChatInput(newVal);
+    }
+
+    setMentionState(null);
+
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus();
+        const nextPos = (before + tagText).length;
+        inputRef.current.setSelectionRange(nextPos, nextPos);
+      }
+    }, 20);
+  };
+
+  const handleInputKeyDown = (
+    e: React.KeyboardEvent<HTMLInputElement>,
+    target: 'channel' | 'dm'
+  ) => {
+    if (mentionState && mentionState.isOpen && mentionState.target === target) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionState((prev) =>
+          prev
+            ? { ...prev, selectedIndex: (prev.selectedIndex + 1) % prev.candidates.length }
+            : null
+        );
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionState((prev) =>
+          prev
+            ? {
+                ...prev,
+                selectedIndex:
+                  (prev.selectedIndex - 1 + prev.candidates.length) % prev.candidates.length
+              }
+            : null
+        );
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        const candidate = mentionState.candidates[mentionState.selectedIndex];
+        if (candidate) {
+          handleSelectMention(candidate);
+        }
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionState(null);
+        return;
+      }
+    }
+  };
+
+  const handleChannelInputChange = (val: string, selectionStart?: number) => {
+    setChannelChatInput(val);
+    handleMentionSearch(val, 'channel', selectionStart);
+
+    if (!activeChannelId || !currentUsername) return;
+    const contextId = `channel_${activeChannelId}`;
+    const userObj = {
+      username: currentUsername,
+      displayName: currentDisplayName,
+      avatar: avatarPreview
+    };
+
+    if (val.trim().length > 0) {
+      if (!isChannelTypingRef.current) {
+        isChannelTypingRef.current = true;
+        setTypingStatus(contextId, userObj, true);
+      }
+      if (channelTypingTimeoutRef.current) clearTimeout(channelTypingTimeoutRef.current);
+      channelTypingTimeoutRef.current = setTimeout(() => {
+        isChannelTypingRef.current = false;
+        setTypingStatus(contextId, userObj, false);
+      }, 3500);
+    } else {
+      if (channelTypingTimeoutRef.current) clearTimeout(channelTypingTimeoutRef.current);
+      isChannelTypingRef.current = false;
+      setTypingStatus(contextId, userObj, false);
+    }
+  };
+
+  const handleDmInputChange = (val: string, selectionStart?: number) => {
+    setChatInput(val);
+    handleMentionSearch(val, 'dm', selectionStart);
+
+    if (selectedDm === 'self' || !currentUsername) return;
+    const dmChatId = getDmChatId(currentUsername, selectedDm);
+    const contextId = `dm_${dmChatId}`;
+    const userObj = {
+      username: currentUsername,
+      displayName: currentDisplayName,
+      avatar: avatarPreview
+    };
+
+    if (val.trim().length > 0) {
+      if (!isDmTypingRef.current) {
+        isDmTypingRef.current = true;
+        setTypingStatus(contextId, userObj, true);
+      }
+      if (dmTypingTimeoutRef.current) clearTimeout(dmTypingTimeoutRef.current);
+      dmTypingTimeoutRef.current = setTimeout(() => {
+        isDmTypingRef.current = false;
+        setTypingStatus(contextId, userObj, false);
+      }, 3500);
+    } else {
+      if (dmTypingTimeoutRef.current) clearTimeout(dmTypingTimeoutRef.current);
+      isDmTypingRef.current = false;
+      setTypingStatus(contextId, userObj, false);
     }
   };
 
@@ -2429,7 +2744,16 @@ export default function App() {
                     </div>
 
                     {/* Chat Input Bar */}
-                    <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0">
+                    <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0 relative">
+                      {/* Mention Autocomplete Popover */}
+                      {mentionState && mentionState.isOpen && mentionState.target === 'dm' && (
+                        <MentionAutocomplete
+                          candidates={mentionState.candidates}
+                          selectedIndex={mentionState.selectedIndex}
+                          onSelect={handleSelectMention}
+                        />
+                      )}
+
                       {/* Replying banner */}
                       {replyTarget && (replyTarget.location === 'self' || replyTarget.location === 'dm') && (
                         <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] px-3.5 py-1.5 flex items-center justify-between text-[12px] text-[#949ba4]">
@@ -2495,9 +2819,11 @@ export default function App() {
 
                         {/* Input field */}
                         <input
+                          ref={dmInputRef}
                           type="text"
                           value={chatInput}
-                          onChange={(e) => setChatInput(e.target.value)}
+                          onChange={(e) => handleDmInputChange(e.target.value, e.target.selectionStart ?? undefined)}
+                          onKeyDown={(e) => handleInputKeyDown(e, 'dm')}
                           placeholder={`Message @${currentDisplayName}`}
                           className="bg-transparent text-white placeholder-[#949ba4] text-[15px] outline-none flex-1 pr-3"
                         />
@@ -2732,7 +3058,16 @@ export default function App() {
                         </div>
 
                         {/* Chat Input Bar */}
-                        <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0">
+                        <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0 relative">
+                          {/* Mention Autocomplete Popover */}
+                          {mentionState && mentionState.isOpen && mentionState.target === 'dm' && (
+                            <MentionAutocomplete
+                              candidates={mentionState.candidates}
+                              selectedIndex={mentionState.selectedIndex}
+                              onSelect={handleSelectMention}
+                            />
+                          )}
+
                           {/* Replying banner */}
                           {replyTarget && replyTarget.location === 'dm' && (
                             <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] px-3.5 py-1.5 flex items-center justify-between text-[12px] text-[#949ba4]">
@@ -2780,6 +3115,13 @@ export default function App() {
                             </div>
                           )}
 
+                          {/* Typing indicator above the input box */}
+                          {dmTypingUsers.length > 0 && (
+                            <div className="mb-1">
+                              <TypingIndicator typingUsers={dmTypingUsers} />
+                            </div>
+                          )}
+
                           <form
                             onSubmit={handleSendDmMessage}
                             className={`bg-[#1e1f22] border border-transparent focus-within:border-[#ff6b00]/40 flex items-center px-4 py-2.5 transition-colors ${
@@ -2796,9 +3138,11 @@ export default function App() {
                             </button>
 
                             <input
+                              ref={dmInputRef}
                               type="text"
                               value={chatInput}
-                              onChange={(e) => setChatInput(e.target.value)}
+                              onChange={(e) => handleDmInputChange(e.target.value, e.target.selectionStart ?? undefined)}
+                              onKeyDown={(e) => handleInputKeyDown(e, 'dm')}
                               placeholder={`Message @${targetUserProfile.displayName || targetUserProfile.username}`}
                               className="bg-transparent text-white placeholder-[#949ba4] text-[15px] outline-none flex-1 pr-3"
                             />
@@ -3004,7 +3348,16 @@ export default function App() {
                   </div>
 
                   {/* Channel Chat Input Bar */}
-                  <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0">
+                  <div className="px-4 pb-6 pt-2 bg-[#111214] flex-shrink-0 relative">
+                    {/* Mention Autocomplete Popover */}
+                    {mentionState && mentionState.isOpen && mentionState.target === 'channel' && (
+                      <MentionAutocomplete
+                        candidates={mentionState.candidates}
+                        selectedIndex={mentionState.selectedIndex}
+                        onSelect={handleSelectMention}
+                      />
+                    )}
+
                     {/* Replying banner */}
                     {replyTarget && replyTarget.location === 'channel' && (
                       <div className="bg-[#18191c] border-t border-l border-r border-[#232428] rounded-t-[8px] px-3.5 py-1.5 flex items-center justify-between text-[12px] text-[#949ba4]">
@@ -3052,6 +3405,13 @@ export default function App() {
                       </div>
                     )}
 
+                    {/* Typing indicator above the search / message input */}
+                    {channelTypingUsers.length > 0 && (
+                      <div className="mb-1">
+                        <TypingIndicator typingUsers={channelTypingUsers} />
+                      </div>
+                    )}
+
                     <form
                       onSubmit={handleSendChannelMessage}
                       className={`bg-[#1e1f22] border border-transparent focus-within:border-[#ff6b00]/40 flex items-center px-4 py-2.5 transition-colors ${
@@ -3068,9 +3428,11 @@ export default function App() {
                       </button>
 
                       <input
+                        ref={channelInputRef}
                         type="text"
                         value={channelChatInput}
-                        onChange={(e) => setChannelChatInput(e.target.value)}
+                        onChange={(e) => handleChannelInputChange(e.target.value, e.target.selectionStart ?? undefined)}
+                        onKeyDown={(e) => handleInputKeyDown(e, 'channel')}
                         placeholder={`Message #${activeChannelId}`}
                         className="bg-transparent text-white placeholder-[#949ba4] text-[15px] outline-none flex-1 pr-3"
                       />

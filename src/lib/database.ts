@@ -652,3 +652,72 @@ export async function setClosedDm(
   }
 }
 
+export interface TypingUser {
+  username: string;
+  displayName: string;
+  avatar: string | null;
+  timestamp: number;
+}
+
+/**
+ * Sets or clears typing indicator status for a given chat context (channel or DM).
+ */
+export async function setTypingStatus(
+  contextId: string,
+  user: { username: string; displayName: string; avatar: string | null },
+  isTyping: boolean
+): Promise<void> {
+  if (!contextId || !user.username) return;
+  const safeContext = normalizeKey(contextId);
+  const safeUser = normalizeKey(user.username);
+  const typingUserRef = ref(rtdb, `typing/${safeContext}/${safeUser}`);
+
+  if (isTyping) {
+    await set(typingUserRef, {
+      username: user.username,
+      displayName: user.displayName || user.username,
+      avatar: user.avatar || null,
+      timestamp: Date.now()
+    });
+  } else {
+    await remove(typingUserRef);
+  }
+}
+
+/**
+ * Subscribes to real-time typing indicators for a channel or DM.
+ * Automatically cleans up expired statuses (> 6 seconds old).
+ */
+export function subscribeToTyping(
+  contextId: string,
+  callback: (users: TypingUser[]) => void
+): () => void {
+  if (!contextId) return () => {};
+  const safeContext = normalizeKey(contextId);
+  const typingRef = ref(rtdb, `typing/${safeContext}`);
+
+  const unsubscribe = onValue(typingRef, (snapshot) => {
+    if (!snapshot.exists()) {
+      callback([]);
+      return;
+    }
+    const val = snapshot.val();
+    const now = Date.now();
+    const users: TypingUser[] = [];
+    for (const key of Object.keys(val)) {
+      const u = val[key];
+      if (u && u.username && now - (u.timestamp || 0) < 6000) {
+        users.push({
+          username: u.username,
+          displayName: u.displayName || u.username,
+          avatar: u.avatar || null,
+          timestamp: u.timestamp || now
+        });
+      }
+    }
+    callback(users);
+  });
+
+  return unsubscribe;
+}
+

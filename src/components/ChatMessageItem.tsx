@@ -27,6 +27,66 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
   const pickerRef = useRef<HTMLDivElement>(null);
   const isAuthor = msg.authorUsername.toLowerCase() === currentUsername.toLowerCase();
 
+  // Check if message is a reply to the current user
+  const isReplyToMe = Boolean(
+    msg.replyTo &&
+    currentUsername &&
+    msg.replyTo.authorUsername?.toLowerCase() === currentUsername.toLowerCase()
+  );
+
+  // Check if message mentions current user or @everyone
+  const escapedUsername = currentUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const isMentionedMe = Boolean(
+    !isAuthor && (
+      (escapedUsername ? new RegExp(`@${escapedUsername}(\\b|$)`, 'i').test(msg.text || '') : false) ||
+      /@everyone(\b|$)/i.test(msg.text || '')
+    )
+  );
+
+  const isHighlighted = isReplyToMe || isMentionedMe;
+
+  // Format mentions in text as Discord-style pills
+  const renderFormattedText = (text: string) => {
+    if (!text) return null;
+    const mentionRegex = /(@everyone|@here|@[a-zA-Z0-9_.-]+)/g;
+    const parts = text.split(mentionRegex);
+
+    return parts.map((part, index) => {
+      if (!part) return null;
+      if (part === '@everyone' || part === '@here') {
+        return (
+          <span
+            key={index}
+            className="bg-[#ff6b00]/25 text-[#ff944d] hover:bg-[#ff6b00]/35 font-semibold px-1.5 py-0.5 rounded-[3px] select-text transition-colors cursor-pointer"
+          >
+            {part}
+          </span>
+        );
+      }
+      if (part.startsWith('@')) {
+        const targetUser = part.slice(1);
+        const isTargetMe = targetUser.toLowerCase() === currentUsername.toLowerCase();
+        return (
+          <span
+            key={index}
+            onClick={(e) => {
+              e.stopPropagation();
+              onAuthorClick?.(targetUser);
+            }}
+            className={`font-medium px-1.5 py-0.5 rounded-[3px] select-text transition-colors cursor-pointer ${
+              isTargetMe
+                ? 'bg-[#ff6b00]/30 text-[#ffaa66] hover:bg-[#ff6b00]/40 font-semibold'
+                : 'bg-[#ff6b00]/15 text-[#ff8f3d] hover:bg-[#ff6b00]/25'
+            }`}
+          >
+            {part}
+          </span>
+        );
+      }
+      return <span key={index}>{part}</span>;
+    });
+  };
+
   // Close emoji picker on click outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -41,12 +101,22 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
   }, [showEmojiPicker]);
 
   return (
-    <div className="group relative flex flex-col py-1.5 px-3 -mx-3 hover:bg-[#18191c]/70 rounded-[4px] transition-colors">
+    <div
+      className={`group relative flex flex-col py-1.5 px-3 -mx-3 rounded-[4px] transition-colors border-l-[3px] ${
+        isHighlighted
+          ? 'bg-[#ff6b00]/10 hover:bg-[#ff6b00]/15 border-[#ff6b00]'
+          : 'border-transparent hover:bg-[#18191c]/70'
+      }`}
+    >
       {/* Discord-style Curved Inline Reply line with Author Avatar + Name + Snippet */}
       {msg.replyTo && (
         <div className="flex items-center gap-2 text-[12px] text-[#949ba4] ml-5 mb-1 select-none">
           {/* Curved line connection */}
-          <div className="w-6 h-3 border-l-2 border-t-2 border-[#4e5058] rounded-tl-md -mt-1 ml-1 flex-shrink-0" />
+          <div
+            className={`w-6 h-3 border-l-2 border-t-2 rounded-tl-md -mt-1 ml-1 flex-shrink-0 ${
+              isReplyToMe ? 'border-[#ff6b00]' : 'border-[#4e5058]'
+            }`}
+          />
 
           {/* Mini Author Avatar in quoted line */}
           <div className="w-4 h-4 rounded-full bg-[#2b2d31] overflow-hidden flex items-center justify-center flex-shrink-0">
@@ -58,7 +128,11 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
           </div>
 
           {/* Quoted author name */}
-          <span className="font-semibold text-white/90 hover:underline cursor-pointer truncate max-w-[140px]">
+          <span
+            className={`font-semibold hover:underline cursor-pointer truncate max-w-[140px] ${
+              isReplyToMe ? 'text-[#ff944d]' : 'text-white/90'
+            }`}
+          >
             @{msg.replyTo.authorDisplayName || msg.replyTo.authorUsername}
           </span>
 
@@ -72,6 +146,12 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
               '...'
             )}
           </span>
+
+          {isReplyToMe && (
+            <span className="text-[10px] uppercase font-bold text-[#ff6b00] bg-[#ff6b00]/15 px-1 py-0.2 rounded ml-1">
+              Replied to you
+            </span>
+          )}
         </div>
       )}
 
@@ -106,7 +186,7 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
           {/* Text body */}
           {msg.text && (
             <p className="text-[15px] text-[#dbdee1] leading-relaxed break-words whitespace-pre-wrap select-text mt-0.5">
-              {msg.text}
+              {renderFormattedText(msg.text)}
             </p>
           )}
 
