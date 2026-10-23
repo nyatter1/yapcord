@@ -721,3 +721,59 @@ export function subscribeToTyping(
   return unsubscribe;
 }
 
+/**
+ * Detects whether a message pings (mentions or replies to) the given user.
+ */
+export function isMessagePingForUser(
+  msg: {
+    authorUsername?: string;
+    text?: string;
+    replyTo?: { authorUsername?: string } | null;
+  },
+  currentUsername: string,
+  currentDisplayName?: string
+): boolean {
+  if (!msg || !currentUsername) return false;
+  const isAuthor = msg.authorUsername?.toLowerCase() === currentUsername.toLowerCase();
+  if (isAuthor) return false;
+
+  // Check if message is a reply to the current user
+  if (
+    msg.replyTo &&
+    msg.replyTo.authorUsername &&
+    msg.replyTo.authorUsername.toLowerCase() === currentUsername.toLowerCase()
+  ) {
+    return true;
+  }
+
+  const text = msg.text || '';
+  if (!text) return false;
+
+  // Check @everyone or @here
+  if (/@everyone(?=[^a-zA-Z0-9_.-]|$)/i.test(text) || /@here(?=[^a-zA-Z0-9_.-]|$)/i.test(text)) {
+    return true;
+  }
+
+  // Check @username
+  const escapedUsername = currentUsername.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (escapedUsername) {
+    const userRegex = new RegExp(`@${escapedUsername}(?=[^a-zA-Z0-9_.-]|$)`, 'i');
+    if (userRegex.test(text)) {
+      return true;
+    }
+  }
+
+  // Check @displayName if set and different from username
+  if (currentDisplayName && currentDisplayName.trim().toLowerCase() !== currentUsername.toLowerCase()) {
+    const escapedDisplayName = currentDisplayName.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (escapedDisplayName) {
+      const displayRegex = new RegExp(`@${escapedDisplayName}(?=[^a-zA-Z0-9_.-]|$)`, 'i');
+      if (displayRegex.test(text)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+

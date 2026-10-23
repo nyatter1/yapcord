@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { User, ZoomIn, Reply, Trash2, Smile } from 'lucide-react';
-import { ChatMessage } from '../lib/database';
+import { ChatMessage, isMessagePingForUser } from '../lib/database';
 import { EmojiPicker } from './EmojiPicker';
 
 interface ChatMessageItemProps {
@@ -34,16 +34,7 @@ export const ChatMessageItem: React.FC<ChatMessageItemProps> = ({
     msg.replyTo.authorUsername?.toLowerCase() === currentUsername.toLowerCase()
   );
 
-  // Check if message mentions current user or @everyone
-  const escapedUsername = currentUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const isMentionedMe = Boolean(
-    !isAuthor && (
-      (escapedUsername ? new RegExp(`@${escapedUsername}(\\b|$)`, 'i').test(msg.text || '') : false) ||
-      /@everyone(\b|$)/i.test(msg.text || '')
-    )
-  );
-
-  const isHighlighted = isReplyToMe || isMentionedMe;
+  const isHighlighted = isMessagePingForUser(msg, currentUsername);
 
   // Format mentions in text as Discord-style pills
   const renderFormattedText = (text: string) => {

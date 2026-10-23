@@ -34,7 +34,11 @@ import {
   UserCheck,
   Pin,
   PinOff,
-  MoreHorizontal
+  MoreHorizontal,
+  Crown,
+  Shield,
+  Sliders,
+  AlertTriangle
 } from 'lucide-react';
 import { uploadToCloudinary } from './lib/cloudinary';
 import {
@@ -68,13 +72,22 @@ import {
   setClosedDm,
   TypingUser,
   setTypingStatus,
-  subscribeToTyping
+  subscribeToTyping,
+  isMessagePingForUser
 } from './lib/database';
+import {
+  ServerSettingsData,
+  DEFAULT_SERVER_SETTINGS,
+  subscribeToServerSettings,
+  filterProfanity,
+  checkUserPermissions
+} from './lib/serverSettings';
 import { ChatMessageItem } from './components/ChatMessageItem';
 import { FriendsView } from './components/FriendsView';
 import { EmojiPicker } from './components/EmojiPicker';
 import { TypingIndicator } from './components/TypingIndicator';
 import { MentionAutocomplete, MentionCandidate } from './components/MentionAutocomplete';
+import { ServerSettingsModal } from './components/ServerSettingsModal';
 
 type Screen = 'auth' | 'step1' | 'step2' | 'loading' | 'app';
 type AuthMode = 'login' | 'register';
@@ -419,6 +432,12 @@ export default function App() {
   const [showUserSettings, setShowUserSettings] = useState(false);
   const [activeSubMenu, setActiveSubMenu] = useState<'status' | null>(null);
 
+  // Server Settings & AutoMod state
+  const [serverSettings, setServerSettings] = useState<ServerSettingsData>(DEFAULT_SERVER_SETTINGS);
+  const [isServerSettingsOpen, setIsServerSettingsOpen] = useState(false);
+  const [showServerDropdown, setShowServerDropdown] = useState(false);
+  const serverDropdownRef = useRef<HTMLDivElement>(null);
+
   // DMs / Friends header tab and sort filter state
   const [dmTab, setDmTab] = useState<'dms' | 'friends'>(initialSession?.dmTab || 'dms');
   const [friendsFilterTab, setFriendsFilterTab] = useState<'online' | 'all' | 'pending' | 'add'>('online');
@@ -490,6 +509,98 @@ export default function App() {
     regDisplayName.trim() || regUsername.trim() || (loginEmail ? loginEmail.split('@')[0] : 'juxtopposed');
   const currentUsername =
     regUsername.trim() || (loginEmail ? loginEmail.split('@')[0].toLowerCase() : 'juxtopposed');
+
+  // Channel Unread Pings State (channelId -> unread mention count)
+  const [channelUnreadPings, setChannelUnreadPings] = useState<Record<string, number>>(() => {
+    try {
+      const raw = localStorage.getItem(`yapzo_unread_pings_${currentUsername}`);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+
+  const activeChannelIdRef = useRef(activeChannelId);
+  activeChannelIdRef.current = activeChannelId;
+  const activeServerIdRef = useRef(activeServerId);
+  activeServerIdRef.current = activeServerId;
+  const isHomeSelectedRef = useRef(isHomeSelected);
+  isHomeSelectedRef.current = isHomeSelected;
+  const userStatusRef = useRef<UserStatus>(userStatus);
+  userStatusRef.current = userStatus;
+  const currentUsernameRef = useRef(currentUsername);
+  currentUsernameRef.current = currentUsername;
+  const currentDisplayNameRef = useRef(currentDisplayName);
+  currentDisplayNameRef.current = currentDisplayName;
+  const lastAudioPlayTimeRef = useRef<number>(0);
+  const initialSyncCompleteRef = useRef<Record<string, boolean>>({});
+  const seenMessageIdsRef = useRef<Set<string>>(new Set());
+
+  // Total server mentions count across all channels
+  const totalServerPings = Object.values(channelUnreadPings).reduce((sum, count) => sum + count, 0);
+
+  // Play notification sound helper:
+  // "when u get a notifcation the sound notifcation.mp3 will play now when ur on dnd u do not get no notification sound it just shows the amount of timesu was pinged."
+  const playPingSound = () => {
+    if (userStatusRef.current === 'dnd') {
+      return;
+    }
+    const now = Date.now();
+    if (now - lastAudioPlayTimeRef.current < 250) {
+      return;
+    }
+    lastAudioPlayTimeRef.current = now;
+
+    try {
+      const audio = new Audio('/notification.mp3');
+      audio.volume = 0.85;
+      audio.play().catch((err) => {
+        console.warn('Audio play prevented or unavailable:', err);
+      });
+    } catch (err) {
+      console.warn('Audio error:', err);
+    }
+  };
+
+  // Browser tab title management:
+  // "the tab will change to either 1-99+ depending on how nmany notifs u have in brackets so Yapzo (1)"
+  useEffect(() => {
+    if (totalServerPings <= 0) {
+      document.title = 'Yapzo';
+    } else if (totalServerPings > 99) {
+      document.title = 'Yapzo (99+)';
+    } else {
+      document.title = `Yapzo (${totalServerPings})`;
+    }
+
+    return () => {
+      document.title = 'Yapzo';
+    };
+  }, [totalServerPings]);
+
+  // Persist unread pings to localStorage
+  useEffect(() => {
+    if (currentUsername) {
+      try {
+        localStorage.setItem(`yapzo_unread_pings_${currentUsername}`, JSON.stringify(channelUnreadPings));
+      } catch {}
+    }
+  }, [channelUnreadPings, currentUsername]);
+
+  // Clear unread pings when active channel is viewed
+  useEffect(() => {
+    if (!isHomeSelected && activeServerId === 'yapzo-hq' && activeChannelId) {
+      setChannelUnreadPings((prev) => {
+        if (!prev[activeChannelId]) return prev;
+        const next = { ...prev };
+        delete next[activeChannelId];
+        try {
+          localStorage.setItem(`yapzo_unread_pings_${currentUsername}`, JSON.stringify(next));
+        } catch {}
+        return next;
+      });
+    }
+  }, [isHomeSelected, activeServerId, activeChannelId, currentUsername]);
 
   const selectedFriend = friends.find((f) => f.username.toLowerCase() === selectedDm.toLowerCase()) || null;
 
@@ -912,7 +1023,11 @@ export default function App() {
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (selectedServerMember) {
+        if (isServerSettingsOpen) {
+          setIsServerSettingsOpen(false);
+        } else if (showServerDropdown) {
+          setShowServerDropdown(false);
+        } else if (selectedServerMember) {
           setSelectedServerMember(null);
           setShowMemberMoreMenu(false);
         } else if (previewImageUrl) {
@@ -949,19 +1064,66 @@ export default function App() {
     }
   }, [channelMessages, activeChannelId, activeServerId]);
 
-  // Real-time Firestore subscriptions for channel messages
+  // Real-time subscriptions for ALL Yapzo HQ server channels to detect pings in background
   useEffect(() => {
-    if (screen !== 'app' || !activeChannelId) return;
+    if (screen !== 'app' || !currentUsername) return;
 
-    const unsubscribe = subscribeToChannelMessages(activeChannelId, (messages) => {
-      setChannelMessages((prev) => ({
-        ...prev,
-        [activeChannelId]: messages
-      }));
+    const unsubs = YAPZO_HQ_CHANNELS.map((ch) => {
+      return subscribeToChannelMessages(ch.id, (messages) => {
+        setChannelMessages((prev) => ({
+          ...prev,
+          [ch.id]: messages
+        }));
+
+        // First initial load for this channel: record existing messages so we don't alert old history
+        if (!initialSyncCompleteRef.current[ch.id]) {
+          messages.forEach((m) => seenMessageIdsRef.current.add(m.id));
+          initialSyncCompleteRef.current[ch.id] = true;
+          return;
+        }
+
+        // Subsequent message updates: check for new incoming pings
+        let newPingsCount = 0;
+        messages.forEach((m) => {
+          if (!seenMessageIdsRef.current.has(m.id)) {
+            seenMessageIdsRef.current.add(m.id);
+
+            if (isMessagePingForUser(m, currentUsernameRef.current, currentDisplayNameRef.current)) {
+              // Are we currently active in this channel?
+              const isCurrentlyInThisChannel =
+                !isHomeSelectedRef.current &&
+                activeServerIdRef.current === 'yapzo-hq' &&
+                activeChannelIdRef.current === ch.id &&
+                !document.hidden;
+
+              if (!isCurrentlyInThisChannel) {
+                newPingsCount += 1;
+              }
+            }
+          }
+        });
+
+        if (newPingsCount > 0) {
+          setChannelUnreadPings((prev) => {
+            const updated = {
+              ...prev,
+              [ch.id]: (prev[ch.id] || 0) + newPingsCount
+            };
+            try {
+              localStorage.setItem(`yapzo_unread_pings_${currentUsernameRef.current}`, JSON.stringify(updated));
+            } catch {}
+            return updated;
+          });
+
+          playPingSound();
+        }
+      });
     });
 
-    return () => unsubscribe();
-  }, [screen, activeChannelId]);
+    return () => {
+      unsubs.forEach((unsub) => unsub());
+    };
+  }, [screen, currentUsername]);
 
   // Real-time Firestore subscriptions for self notes
   useEffect(() => {
@@ -1090,11 +1252,22 @@ export default function App() {
     channelMessages
   ]);
 
+  // Real-time server settings subscription (Roles, Owner, Permissions, Profanity filter)
+  useEffect(() => {
+    const unsubscribe = subscribeToServerSettings((settings) => {
+      setServerSettings(settings);
+    });
+    return () => unsubscribe();
+  }, []);
+
   // Click outside to dismiss menus
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (serverMenuRef.current && !serverMenuRef.current.contains(e.target as Node)) {
         setShowServerMenu(false);
+      }
+      if (serverDropdownRef.current && !serverDropdownRef.current.contains(e.target as Node)) {
+        setShowServerDropdown(false);
       }
       if (userSettingsRef.current && !userSettingsRef.current.contains(e.target as Node)) {
         setShowUserSettings(false);
@@ -1499,6 +1672,8 @@ export default function App() {
     try {
       localStorage.removeItem(STORAGE_KEY);
     } catch {}
+    setChannelUnreadPings({});
+    document.title = 'Yapzo';
     setShowUserSettings(false);
     setIsSettingsOpen(false);
     setActiveSubMenu(null);
@@ -1612,9 +1787,17 @@ export default function App() {
       }
     }
 
+    // Server profanity filter check
+    const profanity = filterProfanity(text, serverSettings.profanityFilter);
+    if (profanity.hasProfanity && serverSettings.profanityFilter?.action === 'block') {
+      alert(`Message blocked by AutoMod: Contains prohibited language (${profanity.detectedWords.join(', ')}).`);
+      return;
+    }
+    const cleanText = profanity.filteredText;
+
     const currentMsg: Omit<ChatMessage, 'id'> = {
       channelId: activeChannelId,
-      text,
+      text: cleanText,
       imageUrl: uploadedImageUrl || null,
       authorId: currentUsername,
       authorUsername: currentUsername,
@@ -2125,6 +2308,8 @@ export default function App() {
                 className={`absolute left-0 w-1 rounded-r-full bg-[#ff6b00] transition-all duration-200 ${
                   !isHomeSelected && activeServerId === 'yapzo-hq'
                     ? 'h-10'
+                    : totalServerPings > 0
+                    ? 'h-2'
                     : 'h-0 group-hover:h-5'
                 }`}
               />
@@ -2136,7 +2321,7 @@ export default function App() {
                   setActiveServerId('yapzo-hq');
                   setShowServerMenu(false);
                 }}
-                className={`w-12 h-12 flex items-center justify-center transition-all duration-200 cursor-pointer font-bold select-none text-[14px] tracking-wide ${
+                className={`w-12 h-12 flex items-center justify-center transition-all duration-200 cursor-pointer font-bold select-none text-[14px] tracking-wide relative ${
                   !isHomeSelected && activeServerId === 'yapzo-hq'
                     ? 'rounded-[16px] bg-[#ff6b00] text-white shadow-[0_0_16px_rgba(255,107,0,0.4)]'
                     : 'rounded-[24px] hover:rounded-[16px] bg-[#18191c] hover:bg-[#ff6b00] text-[#dbdee1] hover:text-white'
@@ -2144,6 +2329,16 @@ export default function App() {
                 title="Yapzo HQ"
               >
                 <span>YHQ</span>
+
+                {/* Server Notification Dot Badge: (1) or (99+) */}
+                {totalServerPings > 0 && (
+                  <div
+                    className="absolute -top-1 -right-1.5 bg-[#f23f43] text-white text-[10px] font-bold px-1 min-w-[20px] h-[19px] rounded-full flex items-center justify-center border-2 border-[#111214] shadow-md z-10 pointer-events-none select-none animate-in zoom-in-75 duration-150"
+                    title={`${totalServerPings} unread ping${totalServerPings === 1 ? '' : 's'}`}
+                  >
+                    {totalServerPings > 99 ? '(99+)' : `(${totalServerPings})`}
+                  </div>
+                )}
               </button>
             </div>
 
@@ -2446,12 +2641,89 @@ export default function App() {
             </>
           ) : activeServerId === 'yapzo-hq' ? (
             <>
-              {/* SERVER HEADER: Yapzo HQ */}
-              <div className="h-12 border-b border-[#111214] px-4 font-bold text-white flex items-center justify-between hover:bg-[#232428]/60 cursor-pointer transition-colors shadow-xs flex-shrink-0 select-none">
-                <div className="flex items-center gap-2 truncate">
-                  <span className="truncate text-[15px] font-bold">Yapzo HQ</span>
+              {/* SERVER HEADER: Yapzo HQ with Dropdown */}
+              <div className="relative flex-shrink-0" ref={serverDropdownRef}>
+                <div
+                  onClick={() => setShowServerDropdown(!showServerDropdown)}
+                  className="h-12 border-b border-[#111214] px-4 font-bold text-white flex items-center justify-between hover:bg-[#232428]/60 cursor-pointer transition-colors shadow-xs select-none"
+                >
+                  <div className="flex items-center gap-2 truncate">
+                    <span className="truncate text-[15px] font-bold">{serverSettings.name || 'Yapzo HQ'}</span>
+                    {((regEmail || loginEmail || '').toLowerCase() === (serverSettings.ownerEmail || 'hayden@gmail.com').toLowerCase()) && (
+                      <span title="You are Server Owner">
+                        <Crown className="w-4 h-4 text-[#f0b232] flex-shrink-0" />
+                      </span>
+                    )}
+                  </div>
+                  <ChevronDown
+                    className={`w-4 h-4 text-[#949ba4] flex-shrink-0 transition-transform duration-200 ${
+                      showServerDropdown ? 'rotate-180 text-white' : ''
+                    }`}
+                  />
                 </div>
-                <ChevronDown className="w-4 h-4 text-[#949ba4] flex-shrink-0" />
+
+                {/* DISCORD SERVER DROPDOWN MENU */}
+                {showServerDropdown && (
+                  <div className="absolute left-2 right-2 top-14 bg-[#111214] border border-[#232428] rounded-[6px] shadow-2xl p-1.5 z-50 animate-in fade-in zoom-in-95 duration-100 space-y-0.5">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowServerDropdown(false);
+                        setIsServerSettingsOpen(true);
+                      }}
+                      className="w-full flex items-center justify-between px-2.5 py-2 text-[13px] text-white hover:bg-[#ff6b00] rounded-[4px] transition-colors cursor-pointer text-left font-semibold group"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Settings className="w-4 h-4 text-[#ff6b00] group-hover:text-white" />
+                        <span>Server Settings</span>
+                      </div>
+                      <Crown className="w-3.5 h-3.5 text-[#f0b232] group-hover:text-white" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowServerDropdown(false);
+                        setIsServerSettingsOpen(true);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-[#dbdee1] hover:bg-[#232428] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left"
+                    >
+                      <Shield className="w-4 h-4 text-[#f0b232]" />
+                      <span>Roles & Permissions</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowServerDropdown(false);
+                        setIsServerSettingsOpen(true);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-[#dbdee1] hover:bg-[#232428] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left"
+                    >
+                      <AlertTriangle className="w-4 h-4 text-[#ef4444]" />
+                      <span>Profanity Filter</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowServerDropdown(false);
+                        setIsServerSettingsOpen(true);
+                      }}
+                      className="w-full flex items-center gap-2 px-2.5 py-1.5 text-[13px] text-[#dbdee1] hover:bg-[#232428] hover:text-white rounded-[4px] transition-colors cursor-pointer text-left"
+                    >
+                      <Users className="w-4 h-4 text-[#3b82f6]" />
+                      <span>Manage Members</span>
+                    </button>
+
+                    <div className="h-[1px] bg-[#232428] my-1" />
+
+                    <div className="px-2.5 py-1 text-[11px] text-[#80848e] flex items-center justify-between">
+                      <span>Owner:</span>
+                      <span className="text-[#f0b232] font-semibold truncate max-w-[120px]">{serverSettings.ownerEmail}</span>
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* CHANNELS LIST: categorized */}
@@ -2469,24 +2741,47 @@ export default function App() {
                       </div>
 
                       {channelsInCat.map((ch) => {
-                        const isActive = activeChannelId === ch.id;
+                        const isActive = !isHomeSelected && activeServerId === 'yapzo-hq' && activeChannelId === ch.id;
+                        const pingCount = channelUnreadPings[ch.id] || 0;
                         return (
                           <button
                             key={ch.id}
                             type="button"
-                            onClick={() => setActiveChannelId(ch.id)}
-                            className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-[4px] text-[15px] font-medium transition-colors cursor-pointer group text-left ${
+                            onClick={() => {
+                              setActiveChannelId(ch.id);
+                              setIsHomeSelected(false);
+                              setActiveServerId('yapzo-hq');
+                            }}
+                            className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-[4px] text-[15px] font-medium transition-colors cursor-pointer group text-left ${
                               isActive
                                 ? 'bg-[#2b2d31] text-white font-semibold'
+                                : pingCount > 0
+                                ? 'text-white font-semibold hover:bg-[#232428]/60'
                                 : 'text-[#949ba4] hover:bg-[#232428]/60 hover:text-[#dbdee1]'
                             }`}
                           >
-                            <Hash
-                              className={`w-5 h-5 flex-shrink-0 ${
-                                isActive ? 'text-white' : 'text-[#80848e] group-hover:text-[#dbdee1]'
-                              }`}
-                            />
-                            <span className="truncate">{ch.name}</span>
+                            <div className="flex items-center gap-2 min-w-0 flex-1 truncate">
+                              <Hash
+                                className={`w-5 h-5 flex-shrink-0 ${
+                                  isActive
+                                    ? 'text-white'
+                                    : pingCount > 0
+                                    ? 'text-white'
+                                    : 'text-[#80848e] group-hover:text-[#dbdee1]'
+                                }`}
+                              />
+                              <span className="truncate">{ch.name}</span>
+                            </div>
+
+                            {/* Ping count badge for channel */}
+                            {pingCount > 0 && (
+                              <div
+                                className="ml-2 flex-shrink-0 bg-[#f23f43] text-white text-[11px] font-bold px-1.5 min-w-[18px] h-[18px] rounded-full flex items-center justify-center shadow-xs select-none animate-in zoom-in-75 duration-150"
+                                title={`${pingCount} unread mention${pingCount === 1 ? '' : 's'}`}
+                              >
+                                {pingCount > 99 ? '99+' : pingCount}
+                              </div>
+                            )}
                           </button>
                         );
                       })}
@@ -3507,6 +3802,17 @@ export default function App() {
                           const uAvatar = isCurrent ? avatarPreview : u.avatar;
                           const uDisplayName = isCurrent ? currentDisplayName : u.displayName || u.username;
                           const uAboutMe = isCurrent ? aboutMe : u.aboutMe;
+                          const uEmail = (isCurrent ? (regEmail || loginEmail) : u.email) || '';
+
+                          const isUserOwner =
+                            uEmail.toLowerCase() === (serverSettings.ownerEmail || 'hayden@gmail.com').toLowerCase() ||
+                            u.username.toLowerCase() === 'hayden';
+                          const userRoleIds = serverSettings.memberRoles?.[u.username.toLowerCase()] || [];
+                          const effectiveRoleIds = isUserOwner && !userRoleIds.includes('owner') ? ['owner', ...userRoleIds] : userRoleIds;
+                          const highestRole = effectiveRoleIds
+                            .map((rId) => serverSettings.roles[rId])
+                            .filter(Boolean)
+                            .sort((a, b) => (a.position || 99) - (b.position || 99))[0];
 
                           return (
                             <div
@@ -3547,12 +3853,15 @@ export default function App() {
                               </div>
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-1.5">
-                                  <span className="font-semibold text-white text-[14px] leading-tight truncate group-hover:text-white">
+                                  <span
+                                    className="font-semibold text-[14px] leading-tight truncate group-hover:brightness-110"
+                                    style={{ color: highestRole ? highestRole.color : '#ffffff' }}
+                                  >
                                     {uDisplayName}
                                   </span>
-                                  {isCurrent && (
-                                    <span className="text-[9px] px-1 py-0.5 bg-[#ff6b00]/20 text-[#ff8f3d] font-bold rounded">
-                                      YOU
+                                  {isUserOwner && (
+                                    <span title="Server Owner">
+                                      <Crown className="w-3.5 h-3.5 text-[#f0b232] flex-shrink-0" />
                                     </span>
                                   )}
                                 </div>
@@ -3575,6 +3884,17 @@ export default function App() {
                               const isCurrent = u.username === currentUsername;
                               const uAvatar = isCurrent ? avatarPreview : u.avatar;
                               const uDisplayName = isCurrent ? currentDisplayName : u.displayName || u.username;
+                              const uEmail = (isCurrent ? (regEmail || loginEmail) : u.email) || '';
+
+                              const isUserOwner =
+                                uEmail.toLowerCase() === (serverSettings.ownerEmail || 'hayden@gmail.com').toLowerCase() ||
+                                u.username.toLowerCase() === 'hayden';
+                              const userRoleIds = serverSettings.memberRoles?.[u.username.toLowerCase()] || [];
+                              const effectiveRoleIds = isUserOwner && !userRoleIds.includes('owner') ? ['owner', ...userRoleIds] : userRoleIds;
+                              const highestRole = effectiveRoleIds
+                                .map((rId) => serverSettings.roles[rId])
+                                .filter(Boolean)
+                                .sort((a, b) => (a.position || 99) - (b.position || 99))[0];
 
                               return (
                                 <div
@@ -3612,9 +3932,19 @@ export default function App() {
                                     />
                                   </div>
                                   <div className="min-w-0 flex-1">
-                                    <span className="font-semibold text-[#949ba4] text-[14px] leading-tight truncate group-hover:text-white">
-                                      {uDisplayName}
-                                    </span>
+                                    <div className="flex items-center gap-1.5">
+                                      <span
+                                        className="font-semibold text-[14px] leading-tight truncate group-hover:brightness-110"
+                                        style={{ color: highestRole ? highestRole.color : '#949ba4' }}
+                                      >
+                                        {uDisplayName}
+                                      </span>
+                                      {isUserOwner && (
+                                        <span title="Server Owner">
+                                          <Crown className="w-3.5 h-3.5 text-[#f0b232] flex-shrink-0" />
+                                        </span>
+                                      )}
+                                    </div>
                                   </div>
                                 </div>
                               );
@@ -3933,6 +4263,17 @@ export default function App() {
             />
           </div>
         )}
+
+        {/* FULLSCREEN SERVER SETTINGS MODAL */}
+        <ServerSettingsModal
+          isOpen={isServerSettingsOpen}
+          onClose={() => setIsServerSettingsOpen(false)}
+          settings={serverSettings}
+          currentUserEmail={regEmail || loginEmail || ''}
+          currentUsername={currentUsername}
+          allUsers={allUsers}
+          onSettingsUpdated={(updated) => setServerSettings(updated)}
+        />
 
         {/* IMAGE RESIZE MODAL */}
         {cropModal && cropModal.isOpen && (
