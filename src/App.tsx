@@ -2668,11 +2668,6 @@ export default function App() {
                 >
                   <div className="flex items-center gap-2 truncate">
                     <span className="truncate text-[15px] font-bold">{serverSettings.name || 'Yapzo HQ'}</span>
-                    {isServerOwner && (
-                      <span title="Server Owner">
-                        <Crown className="w-4 h-4 text-[#f0b232] flex-shrink-0" />
-                      </span>
-                    )}
                   </div>
                   {canManageServer && (
                     <ChevronDown
@@ -2683,7 +2678,7 @@ export default function App() {
                   )}
                 </div>
 
-                {/* DISCORD SERVER DROPDOWN MENU - ONLY SHOWS SERVER SETTINGS */}
+                {/* DISCORD SERVER DROPDOWN MENU - ONLY SHOWS SERVER SETTINGS (NO ICON) */}
                 {showServerDropdown && canManageServer && (
                   <div className="absolute left-2 right-2 top-14 bg-[#111214] border border-[#232428] rounded-[6px] shadow-2xl p-1 z-50 animate-in fade-in zoom-in-95 duration-100">
                     <button
@@ -2692,12 +2687,9 @@ export default function App() {
                         setShowServerDropdown(false);
                         setIsServerSettingsOpen(true);
                       }}
-                      className="w-full flex items-center justify-between px-2.5 py-2 text-[13px] text-white hover:bg-[#ff6b00] rounded-[4px] transition-colors cursor-pointer text-left font-medium group"
+                      className="w-full px-2.5 py-2 text-[13px] text-white hover:bg-[#ff6b00] rounded-[4px] transition-colors cursor-pointer text-left font-medium"
                     >
-                      <div className="flex items-center gap-2">
-                        <Settings className="w-4 h-4 text-[#ff6b00] group-hover:text-white" />
-                        <span>Server Settings</span>
-                      </div>
+                      <span>Server Settings</span>
                     </button>
                   </div>
                 )}
@@ -3912,11 +3904,6 @@ export default function App() {
                             >
                               {uDisplayName}
                             </span>
-                            {info?.isUserOwner && (
-                              <span title="Server Owner">
-                                <Crown className="w-3.5 h-3.5 text-[#f0b232] flex-shrink-0" />
-                              </span>
-                            )}
                           </div>
                           <p className="text-[11px] text-[#949ba4] leading-tight truncate mt-0.5">
                             {uAboutMe || (isOffline ? 'Offline' : (STATUS_CONFIG[uStatus]?.label || 'Online'))}

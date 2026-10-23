@@ -21,6 +21,7 @@ export interface ServerRole {
     sendMessages?: boolean;
     attachFiles?: boolean;
     mentionEveryone?: boolean;
+    viewChannels?: boolean;
   };
 }
 
