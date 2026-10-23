@@ -1,0 +1,6 @@
+{
+  "name": "Discord-style Orange & Black Login",
+  "description": "Classic Discord-inspired authentication page with an orange and black theme.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
